@@ -59,8 +59,24 @@ PAGE_CSS = """
     }
     .block-container {
         max-width: 1180px;
-        padding-top: 2.2rem;
+        padding-top: 1.1rem;
         padding-bottom: 3rem;
+    }
+    .app-header {
+        margin-bottom: 0.65rem;
+    }
+    .app-title {
+        color: #f8fafc;
+        font-size: 1.72rem;
+        line-height: 1.18;
+        font-weight: 760;
+        margin: 0 0 0.25rem 0;
+    }
+    .app-subtitle {
+        color: #a8b3c2;
+        font-size: 0.9rem;
+        line-height: 1.45;
+        margin: 0;
     }
     h1, h2, h3, h4, h5, h6,
     [data-testid="stMarkdownContainer"] p,
@@ -71,19 +87,23 @@ PAGE_CSS = """
         background: #121a21;
         border: 1px solid #2a3642;
         border-radius: 8px;
-        padding: 0.9rem 1rem;
+        padding: 0.55rem 0.75rem;
         box-shadow: none;
+        min-height: 72px;
     }
     div[data-testid="stMetric"] label {
         color: #a8b3c2 !important;
         font-weight: 650;
+        font-size: 0.78rem !important;
     }
     div[data-testid="stMetricValue"] {
         color: #f8fafc !important;
         font-weight: 750;
+        font-size: 1.35rem !important;
     }
     div[data-testid="stMetricValue"] > div {
         color: #f8fafc !important;
+        font-size: 1.35rem !important;
     }
     section[data-testid="stSidebar"] {
         background: #10161d;
@@ -95,14 +115,14 @@ PAGE_CSS = """
     .app-panel {
         border: 1px solid #2a3642;
         border-radius: 8px;
-        padding: 1rem 1.1rem;
+        padding: 0.85rem 1rem;
         background: #121a21;
         margin-bottom: 1rem;
     }
     .app-panel-muted {
         border: 1px solid #263340;
         border-radius: 8px;
-        padding: 1rem 1.1rem;
+        padding: 0.85rem 1rem;
         background: #0f171e;
         margin-bottom: 1rem;
     }
@@ -115,7 +135,7 @@ PAGE_CSS = """
     }
     .panel-title {
         color: #f8fafc;
-        font-size: 1.08rem;
+        font-size: 1rem;
         font-weight: 700;
         margin-bottom: 0.2rem;
     }
@@ -134,6 +154,9 @@ PAGE_CSS = """
         background: #102a2a;
         font-size: 0.82rem;
         font-weight: 600;
+    }
+    div[data-testid="stHorizontalBlock"]:has(div[data-testid="stMetric"]) {
+        gap: 0.75rem;
     }
     div[data-testid="stAlert"] {
         border-radius: 8px;
@@ -594,8 +617,15 @@ def estimate_text_transaction_lines(text: str) -> int:
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
     st.markdown(PAGE_CSS, unsafe_allow_html=True)
-    st.title(APP_TITLE)
-    st.caption("証憑画像または取引メモから、日本会計向けの仕訳候補を作成します。")
+    st.markdown(
+        """
+        <div class="app-header">
+            <div class="app-title">AI仕訳アシスタント</div>
+            <p class="app-subtitle">日本の中小企業・個人事業主向け。証憑画像または取引メモから仕訳候補を作成します。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     customer = get_logged_in_customer()
     if not customer:
