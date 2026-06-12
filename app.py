@@ -351,7 +351,7 @@ def main() -> None:
             placeholder="例：2026年6月10日、法人カードでAmazon Japanへ11,000円支払い。キーボードとマウスを購入。消費税10%、適格請求書取得済み。",
         )
         if uploaded_file is not None:
-            st.image(uploaded_file, caption="アップロード済み証憑", width="stretch")
+            st.image(uploaded_file, caption="アップロード済み証憑", width="360")
         run = st.button("仕訳生成", type="primary", width="stretch")
     if run:
         if uploaded_file is None and not text_input.strip():
@@ -370,8 +370,7 @@ def main() -> None:
             st.subheader("入力待機中")
             st.write("証憑画像または取引内容を入力し、「仕訳生成」をクリックしてください。")
             return
-        st.subheader("概要")
-        show_summary_cards(st.session_state["df"])
+        st.subheader("仕訳一覧")
         st.subheader("OCR結果・仕訳一覧")
         edited_df = st.data_editor(st.session_state["df"], num_rows="fixed", width="stretch", hide_index=True)
         st.session_state["df"] = edited_df
