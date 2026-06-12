@@ -58,7 +58,7 @@ PAGE_CSS = """
         color: #e5edf5;
     }
     .block-container {
-        max-width: 1180px;
+        max-width: 1040px;
         padding-top: 2.4rem;
         padding-bottom: 3rem;
     }
@@ -84,6 +84,10 @@ PAGE_CSS = """
         font-size: 0.9rem;
         line-height: 1.45;
         margin: 0.1rem 0 0 0;
+    }
+    .login-shell {
+        max-width: 980px;
+        margin: 0 auto;
     }
     h1, h2, h3, h4, h5, h6,
     [data-testid="stMarkdownContainer"] p,
@@ -462,7 +466,8 @@ def render_login() -> None:
     upgrade_contact = get_config_value("UPGRADE_CONTACT", "上位プランをご希望の場合は管理者までお問い合わせください。")
     safe_upgrade_contact = escape_html(upgrade_contact)
 
-    left, right = st.columns([0.95, 1.05], gap="large")
+    st.markdown("<div class=\"login-shell\">", unsafe_allow_html=True)
+    left, right = st.columns([1, 1], gap="large")
 
     with left:
         st.markdown(
@@ -527,6 +532,7 @@ def render_login() -> None:
                         st.success(message)
                         st.rerun()
 
+    st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
 
