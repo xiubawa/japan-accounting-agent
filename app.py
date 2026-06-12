@@ -786,6 +786,7 @@ def classify_account(account: str) -> str:
     expense_keywords = [
         "仕入", "費", "損", "給料", "賃金", "旅費", "交通", "通信", "水道", "光熱", "広告", "接待",
         "会議", "福利", "外注", "手数料", "家賃", "租税", "保険", "消耗", "減価償却", "雑費",
+        "支払報酬", "報酬", "荷造運賃", "運賃", "発送", "配送", "送料", "支払",
     ]
 
     if any(keyword in account for keyword in revenue_keywords):
