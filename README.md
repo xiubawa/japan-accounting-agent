@@ -23,27 +23,39 @@ copy .env.example .env
 ```text
 OPENAI_API_KEY=your_api_key
 OPENAI_MODEL=gpt-4o
-PLAN_ACCESS_CODES={"starter-demo":"starter","business-demo":"business","firm-demo":"accounting_firm"}
+CUSTOMER_ACCOUNTS={"demo@example.com":{"password":"demo-pass","plan":"starter","name":"Demo Company"}}
 ```
 
-本番では `PLAN_ACCESS_CODES` を Streamlit Cloud の Secrets に設定してください。例：
+本番では顧客アカウントを Streamlit Cloud の Secrets に設定してください。例：
 
 ```toml
 OPENAI_API_KEY = "your_api_key"
 OPENAI_MODEL = "gpt-4o"
-PLAN_ACCESS_CODES = '{"starter-xxxx":"starter","business-xxxx":"business","firm-xxxx":"accounting_firm"}'
+CUSTOMER_ACCOUNTS = '{"demo@example.com":{"password":"demo-pass","plan":"starter","name":"Demo Company"}}'
 ```
 
 または次の形式でも設定できます。
 
 ```toml
-[plan_codes]
-starter-xxxx = "starter"
-business-xxxx = "business"
-firm-xxxx = "accounting_firm"
+[customers.demo]
+password = "demo-pass"
+plan = "starter"
+name = "Demo Company"
+
+[customers.firm]
+password = "firm-pass"
+plan = "accounting_firm"
+name = "Demo Accounting Firm"
 ```
 
-有料ユーザーには対応するアクセスコードだけを渡してください。コードが未入力または無効な場合は、自動的に無料プランとして扱われます。
+顧客にはユーザーIDとパスワードを渡してください。ログインに成功した顧客だけがアプリを利用でき、顧客ごとの `plan` に応じて一度に処理できる件数が制限されます。
+
+利用できる `plan` は次の通りです。
+
+- `free`: 1件/回
+- `starter`: 5件/回
+- `business`: 20件/回
+- `accounting_firm`: 50件/回
 
 ## 起動
 

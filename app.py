@@ -1,4 +1,5 @@
 import base64
+import hmac
 import io
 import json
 import os
@@ -130,37 +131,96 @@ def get_config_value(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
-def load_plan_codes() -> dict[str, str]:
-    codes: dict[str, str] = {}
+def load_customer_accounts() -> dict[str, dict]:
+    customers: dict[str, dict] = {}
 
-    raw_codes = get_config_value("PLAN_ACCESS_CODES")
-    if raw_codes:
+    raw_customers = get_config_value("CUSTOMER_ACCOUNTS")
+    if raw_customers:
         try:
-            parsed = json.loads(raw_codes)
+            parsed = json.loads(raw_customers)
             if isinstance(parsed, dict):
-                codes.update({str(code).strip(): str(plan).strip() for code, plan in parsed.items()})
+                customers.update(parsed)
         except json.JSONDecodeError:
             pass
 
     try:
-        secret_codes = st.secrets.get("plan_codes", {})
-        codes.update({str(code).strip(): str(plan).strip() for code, plan in secret_codes.items()})
+        secret_customers = st.secrets.get("customers", {})
+        customers.update({str(username): dict(profile) for username, profile in secret_customers.items()})
     except Exception:
         pass
 
-    return {code: plan for code, plan in codes.items() if code and plan in PLAN_CONFIG}
+    normalized: dict[str, dict] = {}
+    for username, profile in customers.items():
+        if not isinstance(profile, dict):
+            continue
+
+        plan_key = str(profile.get("plan", "free")).strip()
+        password = str(profile.get("password", ""))
+        if not username or not password or plan_key not in PLAN_CONFIG:
+            continue
+
+        normalized[str(username).strip()] = {
+            "password": password,
+            "plan": plan_key,
+            "name": str(profile.get("name", username)).strip() or str(username),
+        }
+
+    return normalized
 
 
-def resolve_plan(access_code: str) -> tuple[str, bool]:
-    code = (access_code or "").strip()
-    if not code:
-        return "free", False
+def authenticate_customer(username: str, password: str) -> dict | None:
+    username = (username or "").strip()
+    password = password or ""
+    profile = load_customer_accounts().get(username)
 
-    plan_key = load_plan_codes().get(code)
-    if plan_key in PLAN_CONFIG:
-        return plan_key, True
+    if not profile:
+        return None
+    if not hmac.compare_digest(password, profile["password"]):
+        return None
 
-    return "free", False
+    plan_key = profile["plan"]
+    return {
+        "username": username,
+        "name": profile["name"],
+        "plan_key": plan_key,
+        "plan_label": PLAN_CONFIG[plan_key]["label"],
+        "max_files": PLAN_CONFIG[plan_key]["limit"],
+    }
+
+
+def get_logged_in_customer() -> dict | None:
+    customer = st.session_state.get("customer")
+    if isinstance(customer, dict) and customer.get("username") and customer.get("plan_key") in PLAN_CONFIG:
+        return customer
+    return None
+
+
+def logout_customer() -> None:
+    for key in ["customer", "df", "result"]:
+        st.session_state.pop(key, None)
+    st.rerun()
+
+
+def render_login() -> None:
+    if not load_customer_accounts():
+        st.error("顧客アカウントが設定されていません。管理者が Streamlit Secrets に customers を設定してください。")
+        st.stop()
+
+    st.subheader("ログイン")
+    with st.form("customer_login_form"):
+        username = st.text_input("メールアドレス / ユーザーID")
+        password = st.text_input("パスワード", type="password")
+        submitted = st.form_submit_button("ログイン", type="primary", width="stretch")
+
+    if submitted:
+        customer = authenticate_customer(username, password)
+        if customer:
+            st.session_state["customer"] = customer
+            st.rerun()
+        st.error("ユーザーIDまたはパスワードが正しくありません。")
+
+    st.info("アカウントをお持ちでない場合は、管理者から発行されたログイン情報をご利用ください。")
+    st.stop()
 
 
 def get_client() -> OpenAI:
@@ -276,22 +336,24 @@ def main() -> None:
     st.title(APP_TITLE)
     st.caption("証憑画像または取引内容入力 → AI Vision解析 → 仕訳候補生成 → 確認 → Excel出力")
 
+    customer = get_logged_in_customer()
+    if not customer:
+        render_login()
+
     with st.sidebar:
         st.header("設定")
+        st.subheader("アカウント")
+        st.write(customer["name"])
+        st.caption(customer["username"])
+        if st.button("ログアウト", width="stretch"):
+            logout_customer()
+
         st.success("現在モード：AI Vision API版")
-        model = st.text_input("OpenAI Model", value=DEFAULT_MODEL)
-        access_code = st.text_input("プランアクセスコード", type="password", placeholder="有料プランのコードを入力")
-        plan_key, valid_code = resolve_plan(access_code)
-        plan = PLAN_CONFIG[plan_key]
-        max_files = plan["limit"]
+        model = DEFAULT_MODEL
+        max_files = int(customer["max_files"])
 
-        if access_code and not valid_code:
-            st.error("アクセスコードが無効です。無料プランとして処理します。")
-        elif valid_code:
-            st.success(f"{plan['label']} が有効です。")
-        else:
-            st.info("現在のプラン：無料プラン")
-
+        st.info(f"現在のプラン：{customer['plan_label']}")
+        st.caption(f"AIモデル：{model}")
         st.caption(f"このプランでは一度に最大 {max_files} 件まで処理できます。")
         st.warning("AIによる参考判定です。最終的な会計・税務判断は税理士へ確認してください。")
 
