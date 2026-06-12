@@ -14,6 +14,12 @@ load_dotenv()
 
 APP_TITLE = "AI仕訳アシスタント（日本の中小企業・個人事業主向け）"
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+PLAN_LIMITS = {
+    "無料プラン（1件/回）": 1,
+    "スタータープラン（5件/回）": 5,
+    "ビジネスプラン（20件/回）": 20,
+    "会計事務所プラン（50件/回）": 50,
+}
 
 EXCEL_COLUMNS = [
     "取引日", "証憑日付", "取引先", "摘要", "借方勘定科目", "借方補助科目", "借方金額", "借方税区分",
@@ -231,7 +237,9 @@ def main() -> None:
         st.header("設定")
         st.success("現在モード：AI Vision API版")
         model = st.text_input("OpenAI Model", value=DEFAULT_MODEL)
-        max_files = st.number_input("一度に処理する最大ファイル数", min_value=1, max_value=50, value=10)
+        plan_name = st.selectbox("料金プラン", options=list(PLAN_LIMITS.keys()), index=1)
+        max_files = PLAN_LIMITS[plan_name]
+        st.caption(f"このプランでは一度に最大 {max_files} 件まで処理できます。")
         st.warning("AIによる参考判定です。最終的な会計・税務判断は税理士へ確認してください。")
 
     left, right = st.columns([0.85, 1.15])
