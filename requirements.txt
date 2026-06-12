@@ -1,6 +1,9 @@
 streamlit
-openai
 pandas
 openpyxl
+pillow
 python-dotenv
-Pillow
+easyocr
+opencv-python-headless
+torch
+torchvision
