@@ -351,7 +351,7 @@ def main() -> None:
             placeholder="例：2026年6月10日、法人カードでAmazon Japanへ11,000円支払い。キーボードとマウスを購入。消費税10%、適格請求書取得済み。",
         )
         if uploaded_file is not None:
-            st.image(uploaded_file, caption="アップロード済み証憑", width="360")
+            st.image(uploaded_file, caption="アップロード済み証憑", width=360)
         run = st.button("仕訳生成", type="primary", width="stretch")
     if run:
         if uploaded_file is None and not text_input.strip():
