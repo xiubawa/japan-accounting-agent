@@ -59,7 +59,7 @@ PAGE_CSS = """
     }
     .block-container {
         max-width: 1040px;
-        padding-top: 2.4rem;
+        padding-top: 4.25rem;
         padding-bottom: 3rem;
     }
     .app-header {
@@ -87,7 +87,7 @@ PAGE_CSS = """
     }
     .login-shell {
         max-width: 980px;
-        margin: 0 auto;
+        margin: 1.25rem auto 0 auto;
     }
     h1, h2, h3, h4, h5, h6,
     [data-testid="stMarkdownContainer"] p,
