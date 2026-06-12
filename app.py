@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import html
 import io
 import json
 import os
@@ -49,6 +50,71 @@ PLAN_TEXT_EXAMPLES = {
         "B社 2026年6月13日、飲食店、9,900円、法人カード、取引先接待。",
     ]),
 }
+
+PAGE_CSS = """
+<style>
+    .block-container {
+        max-width: 1180px;
+        padding-top: 2.2rem;
+        padding-bottom: 3rem;
+    }
+    div[data-testid="stMetric"] {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 0.85rem 1rem;
+    }
+    div[data-testid="stMetric"] label {
+        color: #64748b;
+    }
+    section[data-testid="stSidebar"] {
+        border-right: 1px solid #e5e7eb;
+    }
+    .app-panel {
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 1rem 1.1rem;
+        background: #ffffff;
+        margin-bottom: 1rem;
+    }
+    .app-panel-muted {
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 1rem 1.1rem;
+        background: #f8fafc;
+        margin-bottom: 1rem;
+    }
+    .eyebrow {
+        color: #64748b;
+        font-size: 0.82rem;
+        font-weight: 700;
+        letter-spacing: 0;
+        margin-bottom: 0.25rem;
+    }
+    .panel-title {
+        color: #0f172a;
+        font-size: 1.08rem;
+        font-weight: 700;
+        margin-bottom: 0.2rem;
+    }
+    .panel-copy {
+        color: #475569;
+        font-size: 0.94rem;
+        line-height: 1.55;
+        margin: 0;
+    }
+    .plan-pill {
+        display: inline-block;
+        border: 1px solid #cbd5e1;
+        border-radius: 999px;
+        padding: 0.2rem 0.55rem;
+        color: #334155;
+        background: #f8fafc;
+        font-size: 0.82rem;
+        font-weight: 600;
+    }
+</style>
+"""
 
 EXCEL_COLUMNS = [
     "取引日", "証憑日付", "取引先", "摘要", "借方勘定科目", "借方補助科目", "借方金額", "借方税区分",
@@ -157,6 +223,10 @@ def get_config_value(name: str, default: str = "") -> str:
     except Exception:
         pass
     return os.getenv(name, default)
+
+
+def escape_html(value: str) -> str:
+    return html.escape(str(value), quote=True)
 
 
 def hash_password(password: str, salt: str | None = None) -> str:
@@ -303,47 +373,73 @@ def logout_customer() -> None:
 
 def render_login() -> None:
     upgrade_contact = get_config_value("UPGRADE_CONTACT", "上位プランをご希望の場合は管理者までお問い合わせください。")
-    login_tab, register_tab = st.tabs(["ログイン", "無料登録"])
+    safe_upgrade_contact = escape_html(upgrade_contact)
 
-    with login_tab:
-        st.subheader("ログイン")
-        with st.form("customer_login_form"):
-            username = st.text_input("メールアドレス / ユーザーID")
-            password = st.text_input("パスワード", type="password")
-            submitted = st.form_submit_button("ログイン", type="primary", width="stretch")
+    left, right = st.columns([0.95, 1.05], gap="large")
 
-        if submitted:
-            customer = authenticate_customer(username, password)
-            if customer:
-                st.session_state["customer"] = customer
-                st.rerun()
-            st.error("ユーザーIDまたはパスワードが正しくありません。")
+    with left:
+        st.markdown(
+            """
+            <div class="app-panel-muted">
+                <div class="eyebrow">SMALL BUSINESS ACCOUNTING</div>
+                <div class="panel-title">領収書から仕訳候補まで、確認しやすく。</div>
+                <p class="panel-copy">
+                    日本の中小企業・個人事業主向けに、証憑画像や取引メモから仕訳候補を作成します。
+                    無料登録後は1取引ずつ試せます。
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"""
+            <div class="app-panel">
+                <div class="panel-title">上位プラン</div>
+                <p class="panel-copy">{safe_upgrade_contact}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    with register_tab:
-        st.subheader("無料プランで登録")
-        st.caption("登録直後は無料プランです。上位プランへの変更はお問い合わせください。")
-        with st.form("customer_register_form"):
-            register_name = st.text_input("会社名 / お名前")
-            register_email = st.text_input("メールアドレス")
-            register_password = st.text_input("パスワード（8文字以上）", type="password")
-            register_password_confirm = st.text_input("パスワード確認", type="password")
-            registered = st.form_submit_button("無料登録して始める", type="primary", width="stretch")
+    with right:
+        login_tab, register_tab = st.tabs(["ログイン", "無料登録"])
 
-        if registered:
-            if register_password != register_password_confirm:
-                st.error("確認用パスワードが一致しません。")
-            else:
-                success, message = register_free_customer(register_email, register_password, register_name)
-                if success:
+        with login_tab:
+            with st.form("customer_login_form"):
+                username = st.text_input("メールアドレス / ユーザーID")
+                password = st.text_input("パスワード", type="password")
+                submitted = st.form_submit_button("ログイン", type="primary", width="stretch")
+
+            if submitted:
+                customer = authenticate_customer(username, password)
+                if customer:
+                    st.session_state["customer"] = customer
+                    st.rerun()
+                st.error("ユーザーIDまたはパスワードが正しくありません。")
+
+        with register_tab:
+            st.caption("登録直後は無料プランです。")
+            with st.form("customer_register_form"):
+                register_name = st.text_input("会社名 / お名前")
+                register_email = st.text_input("メールアドレス")
+                register_password = st.text_input("パスワード（8文字以上）", type="password")
+                register_password_confirm = st.text_input("パスワード確認", type="password")
+                registered = st.form_submit_button("無料登録して始める", type="primary", width="stretch")
+
+            if registered:
+                if register_password != register_password_confirm:
+                    st.error("確認用パスワードが一致しません。")
+                else:
+                    success, message = register_free_customer(register_email, register_password, register_name)
+                    if not success:
+                        st.error(message)
+                        st.stop()
                     customer = authenticate_customer(register_email, register_password)
                     if customer:
                         st.session_state["customer"] = customer
                         st.success(message)
                         st.rerun()
-                else:
-                    st.error(message)
 
-    st.info(upgrade_contact)
     st.stop()
 
 
@@ -461,56 +557,77 @@ def estimate_text_transaction_lines(text: str) -> int:
 
 
 def main() -> None:
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
+    st.markdown(PAGE_CSS, unsafe_allow_html=True)
     st.title(APP_TITLE)
-    st.caption("証憑画像または取引内容入力 → AI Vision解析 → 仕訳候補生成 → 確認 → Excel出力")
+    st.caption("証憑画像または取引メモから、日本会計向けの仕訳候補を作成します。")
 
     customer = get_logged_in_customer()
     if not customer:
         render_login()
 
     with st.sidebar:
-        st.header("設定")
-        st.subheader("アカウント")
-        st.write(customer["name"])
+        st.header("アカウント")
+        st.markdown(f"**{customer['name']}**")
         st.caption(customer["username"])
         if st.button("ログアウト", width="stretch"):
             logout_customer()
 
-        st.success("現在モード：AI Vision API版")
+        st.divider()
         model = DEFAULT_MODEL
         transaction_limit = int(customer["transaction_limit"])
-
-        st.info(f"現在のプラン：{customer['plan_label']}")
+        st.markdown(f"<span class=\"plan-pill\">{customer['plan_label']}</span>", unsafe_allow_html=True)
+        st.caption(f"上限：{transaction_limit} 取引/回")
         st.caption(f"AIモデル：{model}")
-        st.caption(f"このプランでは一度に最大 {transaction_limit} 件の取引まで処理できます。")
+        st.divider()
         st.info(get_config_value("UPGRADE_CONTACT", "上位プランをご希望の場合は管理者までお問い合わせください。"))
-        st.warning("AIによる参考判定です。最終的な会計・税務判断は税理士へ確認してください。")
 
-    left, right = st.columns([0.85, 1.15])
+    overview_cols = st.columns(4)
+    overview_cols[0].metric("現在のプラン", customer["plan_label"])
+    overview_cols[1].metric("処理上限", f"{transaction_limit} 取引/回")
+    overview_cols[2].metric("今回の結果", f"{len(st.session_state.get('df', []))} 件")
+    overview_cols[3].metric("出力形式", "Excel")
+
+    left, right = st.columns([0.82, 1.18], gap="large")
 
     with left:
-        uploaded_files = st.file_uploader(
-            "領収書・請求書・明細画像をアップロード",
-            type=["png", "jpg", "jpeg", "webp"],
-            accept_multiple_files=True,
+        st.markdown(
+            """
+            <div class="app-panel">
+                <div class="eyebrow">INPUT</div>
+                <div class="panel-title">証憑または取引内容</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        if uploaded_files:
-            if len(uploaded_files) > transaction_limit:
-                st.error(f"現在のプランでは一度に処理できる証憑画像は{transaction_limit}件までです。")
-                st.stop()
-            st.success(f"{len(uploaded_files)}件の証憑をアップロードしました")
-            for file in uploaded_files[:5]:
-                st.image(file, caption=file.name, width=260)
-            if len(uploaded_files) > 5:
-                st.info(f"ほか {len(uploaded_files) - 5} 件のプレビューを省略しています。")
+        input_mode = st.radio("入力方式", ["画像アップロード", "テキスト入力"], horizontal=True)
+        uploaded_files = []
+        text_input = ""
 
-        text_input = st.text_area(
-            "取引内容を入力",
-            height=160,
-            placeholder=PLAN_TEXT_EXAMPLES.get(customer["plan_key"], PLAN_TEXT_EXAMPLES["free"]),
-        )
-        run = st.button("AI仕訳生成", type="primary", width="stretch")
+        if input_mode == "画像アップロード":
+            uploaded_files = st.file_uploader(
+                "領収書・請求書・明細画像",
+                type=["png", "jpg", "jpeg", "webp"],
+                accept_multiple_files=True,
+            )
+            if uploaded_files:
+                if len(uploaded_files) > transaction_limit:
+                    st.error(f"現在のプランでは一度に処理できる証憑画像は{transaction_limit}件までです。")
+                    st.stop()
+                st.success(f"{len(uploaded_files)}件の証憑をアップロードしました")
+                preview_cols = st.columns(2)
+                for idx, file in enumerate(uploaded_files[:4]):
+                    preview_cols[idx % 2].image(file, caption=file.name, use_container_width=True)
+                if len(uploaded_files) > 4:
+                    st.info(f"ほか {len(uploaded_files) - 4} 件のプレビューを省略しています。")
+        else:
+            text_input = st.text_area(
+                "取引内容",
+                height=210,
+                placeholder=PLAN_TEXT_EXAMPLES.get(customer["plan_key"], PLAN_TEXT_EXAMPLES["free"]),
+            )
+
+        run = st.button("仕訳候補を作成", type="primary", width="stretch")
 
     if run:
         if not uploaded_files and not text_input.strip():
@@ -564,29 +681,46 @@ def main() -> None:
 
     with right:
         if "df" not in st.session_state:
-            st.subheader("入力待機中")
-            st.write("証憑画像または取引内容を入力し、『AI仕訳生成』をクリックしてください。")
+            st.markdown(
+                """
+                <div class="app-panel-muted">
+                    <div class="eyebrow">RESULT</div>
+                    <div class="panel-title">結果はここに表示されます</div>
+                    <p class="panel-copy">証憑画像または取引内容を入力して、仕訳候補を作成してください。</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
             return
         df = st.session_state["df"]
-        st.subheader("処理結果")
         total_amount = int(pd.to_numeric(df["税込金額"], errors="coerce").fillna(0).sum()) if not df.empty else 0
+        st.markdown(
+            """
+            <div class="app-panel">
+                <div class="eyebrow">RESULT</div>
+                <div class="panel-title">仕訳候補</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         c1, c2, c3 = st.columns(3)
         c1.metric("取引件数", f"{len(df)} 件")
         c2.metric("税込合計", f"{total_amount:,} 円")
         c3.metric("確認待ち", f"{len(df[df['ステータス'].astype(str).str.contains('確認', na=False)])} 件")
-        st.subheader("仕訳一覧")
+
         edited_df = st.data_editor(df, num_rows="fixed", width="stretch", hide_index=True)
         st.session_state["df"] = edited_df
         excel_bytes = build_excel(edited_df)
         filename = f"ai_accounting_entries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        st.download_button(
-            "Excel出力",
-            data=excel_bytes,
-            file_name=filename,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width="stretch",
-        )
-        with st.expander("AI JSONデータ表示"):
+        with st.expander("出力", expanded=True):
+            st.download_button(
+                "Excelをダウンロード",
+                data=excel_bytes,
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                width="stretch",
+            )
+        with st.expander("AI JSONデータ"):
             st.json(st.session_state.get("result", {}))
 
 
