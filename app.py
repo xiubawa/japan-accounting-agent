@@ -373,7 +373,7 @@ def main() -> None:
         st.subheader("概要")
         show_summary_cards(st.session_state["df"])
         st.subheader("OCR結果・仕訳一覧")
-        edited_df = st.data_editor(st.session_state["df"], num_rows="dynamic", width="stretch", hide_index=True)
+        edited_df = st.data_editor(st.session_state["df"], num_rows="fixed", width="stretch", hide_index=True)
         st.session_state["df"] = edited_df
         excel_bytes = build_excel(edited_df)
         filename = f"japan_accounting_entries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
