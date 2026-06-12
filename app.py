@@ -14,11 +14,11 @@ load_dotenv()
 
 APP_TITLE = "AI仕訳アシスタント（日本の中小企業・個人事業主向け）"
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-PLAN_LIMITS = {
-    "無料プラン（1件/回）": 1,
-    "スタータープラン（5件/回）": 5,
-    "ビジネスプラン（20件/回）": 20,
-    "会計事務所プラン（50件/回）": 50,
+PLAN_CONFIG = {
+    "free": {"label": "無料プラン", "limit": 1},
+    "starter": {"label": "スタータープラン", "limit": 5},
+    "business": {"label": "ビジネスプラン", "limit": 20},
+    "accounting_firm": {"label": "会計事務所プラン", "limit": 50},
 }
 
 EXCEL_COLUMNS = [
@@ -118,6 +118,49 @@ def get_api_key() -> str:
     except Exception:
         pass
     return os.getenv("OPENAI_API_KEY", "")
+
+
+def get_config_value(name: str, default: str = "") -> str:
+    try:
+        value = st.secrets.get(name)
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    return os.getenv(name, default)
+
+
+def load_plan_codes() -> dict[str, str]:
+    codes: dict[str, str] = {}
+
+    raw_codes = get_config_value("PLAN_ACCESS_CODES")
+    if raw_codes:
+        try:
+            parsed = json.loads(raw_codes)
+            if isinstance(parsed, dict):
+                codes.update({str(code).strip(): str(plan).strip() for code, plan in parsed.items()})
+        except json.JSONDecodeError:
+            pass
+
+    try:
+        secret_codes = st.secrets.get("plan_codes", {})
+        codes.update({str(code).strip(): str(plan).strip() for code, plan in secret_codes.items()})
+    except Exception:
+        pass
+
+    return {code: plan for code, plan in codes.items() if code and plan in PLAN_CONFIG}
+
+
+def resolve_plan(access_code: str) -> tuple[str, bool]:
+    code = (access_code or "").strip()
+    if not code:
+        return "free", False
+
+    plan_key = load_plan_codes().get(code)
+    if plan_key in PLAN_CONFIG:
+        return plan_key, True
+
+    return "free", False
 
 
 def get_client() -> OpenAI:
@@ -237,8 +280,18 @@ def main() -> None:
         st.header("設定")
         st.success("現在モード：AI Vision API版")
         model = st.text_input("OpenAI Model", value=DEFAULT_MODEL)
-        plan_name = st.selectbox("料金プラン", options=list(PLAN_LIMITS.keys()), index=1)
-        max_files = PLAN_LIMITS[plan_name]
+        access_code = st.text_input("プランアクセスコード", type="password", placeholder="有料プランのコードを入力")
+        plan_key, valid_code = resolve_plan(access_code)
+        plan = PLAN_CONFIG[plan_key]
+        max_files = plan["limit"]
+
+        if access_code and not valid_code:
+            st.error("アクセスコードが無効です。無料プランとして処理します。")
+        elif valid_code:
+            st.success(f"{plan['label']} が有効です。")
+        else:
+            st.info("現在のプラン：無料プラン")
+
         st.caption(f"このプランでは一度に最大 {max_files} 件まで処理できます。")
         st.warning("AIによる参考判定です。最終的な会計・税務判断は税理士へ確認してください。")
 

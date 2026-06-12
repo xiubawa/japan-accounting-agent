@@ -23,7 +23,27 @@ copy .env.example .env
 ```text
 OPENAI_API_KEY=your_api_key
 OPENAI_MODEL=gpt-4o
+PLAN_ACCESS_CODES={"starter-demo":"starter","business-demo":"business","firm-demo":"accounting_firm"}
 ```
+
+本番では `PLAN_ACCESS_CODES` を Streamlit Cloud の Secrets に設定してください。例：
+
+```toml
+OPENAI_API_KEY = "your_api_key"
+OPENAI_MODEL = "gpt-4o"
+PLAN_ACCESS_CODES = '{"starter-xxxx":"starter","business-xxxx":"business","firm-xxxx":"accounting_firm"}'
+```
+
+または次の形式でも設定できます。
+
+```toml
+[plan_codes]
+starter-xxxx = "starter"
+business-xxxx = "business"
+firm-xxxx = "accounting_firm"
+```
+
+有料ユーザーには対応するアクセスコードだけを渡してください。コードが未入力または無効な場合は、自動的に無料プランとして扱われます。
 
 ## 起動
 
