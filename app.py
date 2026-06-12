@@ -1104,16 +1104,24 @@ def render_closing_workspace(period_label: str, transaction_limit: int) -> None:
     ledger_df = pd.DataFrame(columns=EXCEL_COLUMNS)
 
     if source == "帳簿ファイルをアップロード":
-        uploaded_file = st.file_uploader(
-            "仕訳帳 CSV / Excel",
+        uploaded_files = st.file_uploader(
+            "仕訳帳 CSV / Excel（複数ファイル可）",
             type=["csv", "xlsx", "xls"],
+            accept_multiple_files=True,
             key=f"{period_label}_ledger_upload",
         )
-        if uploaded_file is None:
-            st.info("顧客の仕訳帳ファイルをアップロードしてください。")
+        if not uploaded_files:
+            st.info("顧客の仕訳帳ファイルをアップロードしてください。年次決算では月別ファイルを複数選択できます。")
             return
         try:
-            ledger_df = read_accounting_upload(uploaded_file)
+            ledger_dfs = []
+            for uploaded_file in uploaded_files:
+                uploaded_df = read_accounting_upload(uploaded_file)
+                if not uploaded_df.empty:
+                    uploaded_df["元ファイル名"] = uploaded_file.name
+                    ledger_dfs.append(uploaded_df)
+            ledger_df = pd.concat(ledger_dfs, ignore_index=True) if ledger_dfs else pd.DataFrame(columns=EXCEL_COLUMNS)
+            st.success(f"{len(uploaded_files)}ファイルを読み込みました。合計 {len(ledger_df)} 件の仕訳を集計します。")
         except Exception as exc:
             st.error(f"ファイルを読み取れませんでした：{exc}")
             return
