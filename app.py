@@ -180,6 +180,28 @@ EXCEL_COLUMNS = [
     "消費税額", "支払方法", "インボイス登録番号", "証憑種類", "ステータス", "信頼度", "確認事項", "元ファイル名",
 ]
 
+MONTHLY_CHECKLIST_ITEMS = [
+    ("証憑回収", "領収書・請求書・カード明細・銀行明細が揃っているか確認"),
+    ("預金照合", "普通預金・カード・電子マネー残高と帳簿残高を照合"),
+    ("売掛金/買掛金", "未回収・未払の残高と入金/支払予定を確認"),
+    ("未払/前払", "家賃・通信費・サブスクなど期間対応が必要な費用を確認"),
+    ("給与/源泉", "給与・社会保険・源泉所得税の計上漏れを確認"),
+    ("消費税区分", "課税・非課税・不課税・対象外とインボイス番号を確認"),
+    ("固定資産候補", "10万円以上または資産性のある支出を確認"),
+    ("確認事項", "AIが出した確認事項を原本・税理士へ確認"),
+]
+
+YEARLY_CHECKLIST_ITEMS = [
+    ("年間証憑整理", "年間の証憑・契約書・明細を保管し、不足を確認"),
+    ("棚卸", "商品・材料・仕掛品がある場合は期末棚卸を確認"),
+    ("減価償却", "固定資産台帳、取得・売却・除却、償却費を確認"),
+    ("決算整理", "未払費用・前払費用・未収収益・前受収益を確認"),
+    ("売掛/買掛残高", "期末残高と入金/支払予定の整合性を確認"),
+    ("貸倒/不良債権", "長期未回収の債権がある場合は回収可能性を確認"),
+    ("消費税", "課税売上割合、インボイス、簡易/原則など申告方式を確認"),
+    ("税務申告", "法人税・所得税・地方税・源泉所得税などを専門家へ確認"),
+]
+
 ACCOUNTING_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -587,17 +609,145 @@ def transactions_to_dataframe(result: dict, file_name: str = "") -> pd.DataFrame
     return pd.DataFrame(rows, columns=EXCEL_COLUMNS)
 
 
+def prepare_closing_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    closing_df = df.copy()
+    if closing_df.empty:
+        return closing_df
+
+    closing_df["取引日_dt"] = pd.to_datetime(closing_df["取引日"], errors="coerce")
+    closing_df["月"] = closing_df["取引日_dt"].dt.strftime("%Y-%m").fillna("日付要確認")
+    closing_df["年"] = closing_df["取引日_dt"].dt.strftime("%Y").fillna("日付要確認")
+
+    for column in ["借方金額", "貸方金額", "税込金額", "税抜金額", "消費税額"]:
+        closing_df[column] = pd.to_numeric(closing_df[column], errors="coerce").fillna(0).astype(int)
+
+    closing_df["確認フラグ"] = closing_df["確認事項"].astype(str).str.len() > 0
+    return closing_df
+
+
+def build_monthly_closing_report(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    closing_df = prepare_closing_dataframe(df)
+    if closing_df.empty:
+        empty_summary = pd.DataFrame(columns=["月", "取引件数", "税込合計", "税抜合計", "消費税合計", "確認待ち件数"])
+        empty_accounts = pd.DataFrame(columns=["月", "借方勘定科目", "税込合計", "消費税合計", "取引件数"])
+        empty_taxes = pd.DataFrame(columns=["月", "借方税区分", "税込合計", "消費税合計", "取引件数"])
+        return empty_summary, empty_accounts, empty_taxes
+
+    monthly_summary = (
+        closing_df.groupby("月", dropna=False)
+        .agg(
+            取引件数=("税込金額", "count"),
+            税込合計=("税込金額", "sum"),
+            税抜合計=("税抜金額", "sum"),
+            消費税合計=("消費税額", "sum"),
+            確認待ち件数=("確認フラグ", "sum"),
+        )
+        .reset_index()
+        .sort_values("月")
+    )
+
+    account_summary = (
+        closing_df.groupby(["月", "借方勘定科目"], dropna=False)
+        .agg(
+            税込合計=("税込金額", "sum"),
+            消費税合計=("消費税額", "sum"),
+            取引件数=("税込金額", "count"),
+        )
+        .reset_index()
+        .sort_values(["月", "税込合計"], ascending=[True, False])
+    )
+
+    tax_summary = (
+        closing_df.groupby(["月", "借方税区分"], dropna=False)
+        .agg(
+            税込合計=("税込金額", "sum"),
+            消費税合計=("消費税額", "sum"),
+            取引件数=("税込金額", "count"),
+        )
+        .reset_index()
+        .sort_values(["月", "税込合計"], ascending=[True, False])
+    )
+
+    return monthly_summary, account_summary, tax_summary
+
+
+def build_yearly_closing_report(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    closing_df = prepare_closing_dataframe(df)
+    if closing_df.empty:
+        empty_summary = pd.DataFrame(columns=["年", "取引件数", "税込合計", "税抜合計", "消費税合計", "確認待ち件数"])
+        empty_accounts = pd.DataFrame(columns=["年", "借方勘定科目", "税込合計", "消費税合計", "取引件数"])
+        empty_pending = pd.DataFrame(columns=EXCEL_COLUMNS)
+        return empty_summary, empty_accounts, empty_pending
+
+    yearly_summary = (
+        closing_df.groupby("年", dropna=False)
+        .agg(
+            取引件数=("税込金額", "count"),
+            税込合計=("税込金額", "sum"),
+            税抜合計=("税抜金額", "sum"),
+            消費税合計=("消費税額", "sum"),
+            確認待ち件数=("確認フラグ", "sum"),
+        )
+        .reset_index()
+        .sort_values("年")
+    )
+
+    account_summary = (
+        closing_df.groupby(["年", "借方勘定科目"], dropna=False)
+        .agg(
+            税込合計=("税込金額", "sum"),
+            消費税合計=("消費税額", "sum"),
+            取引件数=("税込金額", "count"),
+        )
+        .reset_index()
+        .sort_values(["年", "税込合計"], ascending=[True, False])
+    )
+
+    pending_items = closing_df[closing_df["確認フラグ"]].copy()
+    pending_items = pending_items[[column for column in EXCEL_COLUMNS if column in pending_items.columns]]
+    return yearly_summary, account_summary, pending_items
+
+
+def build_checklist(items: list[tuple[str, str]], period_label: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "区分": period_label,
+                "チェック項目": title,
+                "確認内容": description,
+                "ステータス": "未確認",
+                "メモ": "",
+            }
+            for title, description in items
+        ]
+    )
+
+
 def build_excel(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
+    monthly_summary, monthly_accounts, monthly_taxes = build_monthly_closing_report(df)
+    yearly_summary, yearly_accounts, yearly_pending = build_yearly_closing_report(df)
+    monthly_checklist = build_checklist(MONTHLY_CHECKLIST_ITEMS, "月次決算")
+    yearly_checklist = build_checklist(YEARLY_CHECKLIST_ITEMS, "年次決算")
+
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="仕訳一覧")
         pending = df[df["確認事項"].astype(str).str.len() > 0].copy()
         pending.to_excel(writer, index=False, sheet_name="確認待ち")
+        monthly_summary.to_excel(writer, index=False, sheet_name="月次サマリー")
+        monthly_accounts.to_excel(writer, index=False, sheet_name="月次科目別")
+        monthly_taxes.to_excel(writer, index=False, sheet_name="月次税区分別")
+        yearly_summary.to_excel(writer, index=False, sheet_name="年次サマリー")
+        yearly_accounts.to_excel(writer, index=False, sheet_name="年次科目別")
+        yearly_pending.to_excel(writer, index=False, sheet_name="年次確認事項")
+        monthly_checklist.to_excel(writer, index=False, sheet_name="月次チェックリスト")
+        yearly_checklist.to_excel(writer, index=False, sheet_name="年次チェックリスト")
         summary = pd.DataFrame([
             {"項目": "処理日時", "内容": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
             {"項目": "取引件数", "内容": len(df)},
             {"項目": "税込合計", "内容": int(pd.to_numeric(df["税込金額"], errors="coerce").fillna(0).sum())},
-            {"項目": "注意", "内容": "AIによる参考判定です。最終判断は税理士へ確認してください。"},
+            {"項目": "出力内容", "内容": "仕訳一覧、月次決算、年次決算、確認チェックリスト"},
+            {"項目": "注意", "内容": "AIによる参考判定です。決算・申告の最終判断は税理士へ確認してください。"},
         ])
         summary.to_excel(writer, index=False, sheet_name="集計")
         workbook = writer.book
@@ -773,9 +923,40 @@ def main() -> None:
         c2.metric("税込合計", f"{total_amount:,} 円")
         c3.metric("確認待ち", f"{len(df[df['ステータス'].astype(str).str.contains('確認', na=False)])} 件")
 
-        edited_df = st.data_editor(df, num_rows="fixed", width="stretch", hide_index=True)
-        st.session_state["df"] = edited_df
-        excel_bytes = build_excel(edited_df)
+        entry_tab, monthly_tab, yearly_tab = st.tabs(["仕訳一覧", "月次決算", "年次決算"])
+
+        with entry_tab:
+            edited_df = st.data_editor(df, num_rows="fixed", width="stretch", hide_index=True)
+            st.session_state["df"] = edited_df
+
+        current_df = st.session_state["df"]
+        monthly_summary, monthly_accounts, monthly_taxes = build_monthly_closing_report(current_df)
+        yearly_summary, yearly_accounts, yearly_pending = build_yearly_closing_report(current_df)
+
+        with monthly_tab:
+            st.markdown("#### 月次サマリー")
+            st.dataframe(monthly_summary, width="stretch", hide_index=True)
+            st.markdown("#### 科目別")
+            st.dataframe(monthly_accounts, width="stretch", hide_index=True)
+            st.markdown("#### 消費税区分別")
+            st.dataframe(monthly_taxes, width="stretch", hide_index=True)
+            with st.expander("月次決算チェックリスト", expanded=False):
+                st.dataframe(build_checklist(MONTHLY_CHECKLIST_ITEMS, "月次決算"), width="stretch", hide_index=True)
+
+        with yearly_tab:
+            st.markdown("#### 年次サマリー")
+            st.dataframe(yearly_summary, width="stretch", hide_index=True)
+            st.markdown("#### 科目別")
+            st.dataframe(yearly_accounts, width="stretch", hide_index=True)
+            st.markdown("#### 決算前の確認事項")
+            if yearly_pending.empty:
+                st.success("AI確認事項が残っている取引はありません。")
+            else:
+                st.dataframe(yearly_pending, width="stretch", hide_index=True)
+            with st.expander("年次決算チェックリスト", expanded=False):
+                st.dataframe(build_checklist(YEARLY_CHECKLIST_ITEMS, "年次決算"), width="stretch", hide_index=True)
+
+        excel_bytes = build_excel(st.session_state["df"])
         filename = f"ai_accounting_entries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         with st.expander("出力", expanded=True):
             st.download_button(
