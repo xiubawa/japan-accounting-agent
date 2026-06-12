@@ -59,15 +59,16 @@ PAGE_CSS = """
     }
     .block-container {
         max-width: 1180px;
-        padding-top: 1.1rem;
+        padding-top: 1.65rem;
         padding-bottom: 3rem;
     }
     .app-header {
-        margin-bottom: 0.65rem;
+        padding-top: 0.35rem;
+        margin-bottom: 0.85rem;
     }
     .app-title {
         color: #f8fafc;
-        font-size: 1.72rem;
+        font-size: 1.8rem;
         line-height: 1.18;
         font-weight: 760;
         margin: 0 0 0.25rem 0;
