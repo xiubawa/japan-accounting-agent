@@ -22,6 +22,30 @@ PLAN_CONFIG = {
     "accounting_firm": {"label": "会計事務所プラン", "limit": 50},
 }
 
+PLAN_TEXT_EXAMPLES = {
+    "free": "例：2026年6月10日、法人カードでAmazon Japanへ11,000円支払い。キーボードとマウスを購入。消費税10%、適格請求書取得済み。",
+    "starter": "\n".join([
+        "例：1行に1取引ずつ入力できます。",
+        "2026年6月10日、法人カードでAmazon Japanへ11,000円支払い。キーボードとマウスを購入。消費税10%。",
+        "2026年6月11日、現金でローソンへ680円支払い。会議用のお茶を購入。",
+        "2026年6月12日、普通預金からNTTへ8,800円支払い。会社携帯料金。",
+    ]),
+    "business": "\n".join([
+        "例：月次の経費をまとめて入力できます。1行1取引で記載してください。",
+        "2026年6月10日、法人カードでAmazon Japanへ11,000円支払い。PC周辺機器を購入。消費税10%。",
+        "2026年6月11日、JRへ1,240円支払い。営業訪問の交通費。",
+        "2026年6月12日、Zoomへ2,200円支払い。オンライン会議ツール利用料。",
+        "2026年6月13日、カフェで1,500円支払い。取引先との打合せ。",
+    ]),
+    "accounting_firm": "\n".join([
+        "例：顧問先ごとの明細をまとめて入力できます。1行1取引で記載してください。",
+        "A社 2026年6月10日、Amazon Japan、11,000円、法人カード、PC周辺機器、消費税10%。",
+        "A社 2026年6月11日、JR、1,240円、営業交通費。",
+        "B社 2026年6月12日、NTT、8,800円、普通預金、通信費。",
+        "B社 2026年6月13日、飲食店、9,900円、法人カード、取引先接待。",
+    ]),
+}
+
 EXCEL_COLUMNS = [
     "取引日", "証憑日付", "取引先", "摘要", "借方勘定科目", "借方補助科目", "借方金額", "借方税区分",
     "貸方勘定科目", "貸方補助科目", "貸方金額", "貸方税区分", "税込金額", "税抜金額", "消費税率",
@@ -184,7 +208,7 @@ def authenticate_customer(username: str, password: str) -> dict | None:
         "name": profile["name"],
         "plan_key": plan_key,
         "plan_label": PLAN_CONFIG[plan_key]["label"],
-        "max_files": PLAN_CONFIG[plan_key]["limit"],
+        "transaction_limit": PLAN_CONFIG[plan_key]["limit"],
     }
 
 
@@ -331,6 +355,11 @@ def build_excel(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+def estimate_text_transaction_lines(text: str) -> int:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return len(lines)
+
+
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
@@ -350,11 +379,11 @@ def main() -> None:
 
         st.success("現在モード：AI Vision API版")
         model = DEFAULT_MODEL
-        max_files = int(customer["max_files"])
+        transaction_limit = int(customer["transaction_limit"])
 
         st.info(f"現在のプラン：{customer['plan_label']}")
         st.caption(f"AIモデル：{model}")
-        st.caption(f"このプランでは一度に最大 {max_files} 件まで処理できます。")
+        st.caption(f"このプランでは一度に最大 {transaction_limit} 件の取引まで処理できます。")
         st.warning("AIによる参考判定です。最終的な会計・税務判断は税理士へ確認してください。")
 
     left, right = st.columns([0.85, 1.15])
@@ -366,8 +395,8 @@ def main() -> None:
             accept_multiple_files=True,
         )
         if uploaded_files:
-            if len(uploaded_files) > max_files:
-                st.error(f"一度に処理できるのは{max_files}件までです。")
+            if len(uploaded_files) > transaction_limit:
+                st.error(f"現在のプランでは一度に処理できる証憑画像は{transaction_limit}件までです。")
                 st.stop()
             st.success(f"{len(uploaded_files)}件の証憑をアップロードしました")
             for file in uploaded_files[:5]:
@@ -378,7 +407,7 @@ def main() -> None:
         text_input = st.text_area(
             "取引内容を入力",
             height=160,
-            placeholder="例：2026年6月10日、法人カードでAmazon Japanへ11,000円支払い。キーボードとマウスを購入。消費税10%、適格請求書取得済み。",
+            placeholder=PLAN_TEXT_EXAMPLES.get(customer["plan_key"], PLAN_TEXT_EXAMPLES["free"]),
         )
         run = st.button("AI仕訳生成", type="primary", width="stretch")
 
@@ -386,6 +415,14 @@ def main() -> None:
         if not uploaded_files and not text_input.strip():
             st.warning("画像をアップロードするか、取引内容を入力してください。")
             return
+        if not uploaded_files:
+            estimated_lines = estimate_text_transaction_lines(text_input)
+            if estimated_lines > transaction_limit:
+                st.error(
+                    f"現在のプランでは一度に処理できる取引は{transaction_limit}件までです。"
+                    f"入力は{estimated_lines}行あります。取引数を減らすか、上位プランをご利用ください。"
+                )
+                return
         client = get_client()
         with st.spinner("AI Visionで証憑を解析しています..."):
             try:
@@ -401,10 +438,23 @@ def main() -> None:
                         progress.progress(idx / len(uploaded_files))
                 else:
                     result = analyze_with_ai_vision(client, model, text_input, None)
+                    transaction_count = len(result.get("transactions", []))
+                    if transaction_count > transaction_limit:
+                        st.error(
+                            f"現在のプランでは一度に処理できる取引は{transaction_limit}件までです。"
+                            f"入力内容は{transaction_count}件として解析されました。取引数を減らすか、上位プランをご利用ください。"
+                        )
+                        return
                     df = transactions_to_dataframe(result, "テキスト入力")
                     all_results.append({"file_name": "テキスト入力", "result": result})
                     all_dfs.append(df)
                 merged_df = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame(columns=EXCEL_COLUMNS)
+                if len(merged_df) > transaction_limit:
+                    st.error(
+                        f"現在のプランでは一度に処理できる取引は{transaction_limit}件までです。"
+                        f"解析結果は{len(merged_df)}件でした。証憑または取引数を減らすか、上位プランをご利用ください。"
+                    )
+                    return
                 st.session_state["result"] = all_results
                 st.session_state["df"] = merged_df
             except Exception as exc:
