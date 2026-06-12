@@ -4,3 +4,4 @@ openpyxl
 pillow
 python-dotenv
 openai
+xlrd

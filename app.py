@@ -777,39 +777,184 @@ def estimate_text_transaction_lines(text: str) -> int:
     return len(lines)
 
 
-def main() -> None:
-    st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
-    st.markdown(PAGE_CSS, unsafe_allow_html=True)
-    st.markdown(
-        """
-        <div class="app-header">
-            <div class="app-title">AI仕訳アシスタント</div>
-            <p class="app-subtitle">日本の中小企業・個人事業主向け。証憑画像または取引メモから仕訳候補を作成します。</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+def classify_account(account: str) -> str:
+    account = str(account or "")
+    asset_keywords = ["現金", "預金", "売掛", "未収", "前払", "仮払", "棚卸", "商品", "建物", "車両", "工具", "備品", "ソフトウェア"]
+    liability_keywords = ["買掛", "未払", "未払金", "借入", "預り", "前受", "仮受", "未払消費税"]
+    equity_keywords = ["資本金", "元入金", "利益剰余", "繰越利益", "事業主借", "事業主貸"]
+    revenue_keywords = ["売上", "収益", "雑収入", "受取利息"]
+    expense_keywords = [
+        "仕入", "費", "損", "給料", "賃金", "旅費", "交通", "通信", "水道", "光熱", "広告", "接待",
+        "会議", "福利", "外注", "手数料", "家賃", "租税", "保険", "消耗", "減価償却", "雑費",
+    ]
+
+    if any(keyword in account for keyword in revenue_keywords):
+        return "収益"
+    if any(keyword in account for keyword in expense_keywords):
+        return "費用"
+    if any(keyword in account for keyword in liability_keywords):
+        return "負債"
+    if any(keyword in account for keyword in equity_keywords):
+        return "純資産"
+    if any(keyword in account for keyword in asset_keywords):
+        return "資産"
+    return "未分類"
+
+
+def read_accounting_upload(uploaded_file) -> pd.DataFrame:
+    if uploaded_file is None:
+        return pd.DataFrame(columns=EXCEL_COLUMNS)
+
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        try:
+            raw_df = pd.read_csv(uploaded_file, encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            uploaded_file.seek(0)
+            raw_df = pd.read_csv(uploaded_file, encoding="cp932")
+    else:
+        raw_df = pd.read_excel(uploaded_file)
+
+    return normalize_uploaded_ledger(raw_df)
+
+
+def normalize_uploaded_ledger(raw_df: pd.DataFrame) -> pd.DataFrame:
+    if raw_df.empty:
+        return pd.DataFrame(columns=EXCEL_COLUMNS)
+
+    column_aliases = {
+        "取引日": ["取引日", "日付", "仕訳日", "伝票日付", "発生日"],
+        "証憑日付": ["証憑日付", "証憑日", "日付", "取引日"],
+        "取引先": ["取引先", "相手先", "支払先", "得意先", "摘要取引先"],
+        "摘要": ["摘要", "内容", "説明", "メモ", "取引内容"],
+        "借方勘定科目": ["借方勘定科目", "借方科目", "借方", "勘定科目", "科目"],
+        "借方補助科目": ["借方補助科目", "借方補助", "補助科目"],
+        "借方金額": ["借方金額", "借方額", "金額", "税込金額", "支出", "出金"],
+        "借方税区分": ["借方税区分", "税区分", "消費税区分"],
+        "貸方勘定科目": ["貸方勘定科目", "貸方科目", "貸方", "相手勘定科目"],
+        "貸方補助科目": ["貸方補助科目", "貸方補助"],
+        "貸方金額": ["貸方金額", "貸方額", "金額", "税込金額", "収入", "入金"],
+        "貸方税区分": ["貸方税区分"],
+        "税込金額": ["税込金額", "金額", "借方金額", "貸方金額"],
+        "税抜金額": ["税抜金額", "本体金額"],
+        "消費税率": ["消費税率", "税率"],
+        "消費税額": ["消費税額", "税額"],
+        "支払方法": ["支払方法", "決済方法", "口座"],
+        "インボイス登録番号": ["インボイス登録番号", "登録番号"],
+        "証憑種類": ["証憑種類", "証憑", "書類種別"],
+        "ステータス": ["ステータス"],
+        "信頼度": ["信頼度"],
+        "確認事項": ["確認事項", "備考", "メモ"],
+        "元ファイル名": ["元ファイル名"],
+    }
+
+    normalized = pd.DataFrame()
+    for target, aliases in column_aliases.items():
+        source = next((column for column in aliases if column in raw_df.columns), None)
+        normalized[target] = raw_df[source] if source else ""
+
+    for column in ["借方金額", "貸方金額", "税込金額", "税抜金額", "消費税額"]:
+        normalized[column] = pd.to_numeric(normalized[column], errors="coerce").fillna(0).astype(int)
+
+    normalized["取引日"] = normalized["取引日"].replace("", "要確認")
+    missing_evidence_date = normalized["証憑日付"].astype(str).str.len() == 0
+    normalized.loc[missing_evidence_date, "証憑日付"] = normalized.loc[missing_evidence_date, "取引日"]
+    normalized["ステータス"] = normalized["ステータス"].replace("", "取込データ")
+    normalized["確認事項"] = normalized["確認事項"].fillna("")
+
+    missing_gross = normalized["税込金額"] == 0
+    normalized.loc[missing_gross, "税込金額"] = normalized.loc[missing_gross, ["借方金額", "貸方金額"]].max(axis=1)
+
+    missing_debit = normalized["借方金額"] == 0
+    normalized.loc[missing_debit, "借方金額"] = normalized.loc[missing_debit, "税込金額"]
+    missing_credit = normalized["貸方金額"] == 0
+    normalized.loc[missing_credit, "貸方金額"] = normalized.loc[missing_credit, "税込金額"]
+
+    return normalized[EXCEL_COLUMNS]
+
+
+def build_trial_balance(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["区分", "勘定科目", "借方合計", "貸方合計", "残高"])
+
+    debit = df.groupby("借方勘定科目", dropna=False)["借方金額"].sum().rename("借方合計")
+    credit = df.groupby("貸方勘定科目", dropna=False)["貸方金額"].sum().rename("貸方合計")
+    trial = pd.concat([debit, credit], axis=1).fillna(0).reset_index().rename(columns={"index": "勘定科目"})
+    trial = trial[trial["勘定科目"].astype(str).str.len() > 0]
+    trial["借方合計"] = trial["借方合計"].astype(int)
+    trial["貸方合計"] = trial["貸方合計"].astype(int)
+    trial["残高"] = trial["借方合計"] - trial["貸方合計"]
+    trial["区分"] = trial["勘定科目"].apply(classify_account)
+    return trial[["区分", "勘定科目", "借方合計", "貸方合計", "残高"]].sort_values(["区分", "勘定科目"])
+
+
+def build_profit_and_loss(trial_balance: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    revenue = trial_balance[trial_balance["区分"] == "収益"].copy()
+    expense = trial_balance[trial_balance["区分"] == "費用"].copy()
+
+    for _, item in revenue.iterrows():
+        rows.append({"区分": "収益", "科目": item["勘定科目"], "金額": int(-item["残高"])})
+    for _, item in expense.iterrows():
+        rows.append({"区分": "費用", "科目": item["勘定科目"], "金額": int(item["残高"])})
+
+    statement = pd.DataFrame(rows, columns=["区分", "科目", "金額"])
+    revenue_total = int(statement[statement["区分"] == "収益"]["金額"].sum()) if not statement.empty else 0
+    expense_total = int(statement[statement["区分"] == "費用"]["金額"].sum()) if not statement.empty else 0
+    net_income = revenue_total - expense_total
+    totals = pd.DataFrame(
+        [
+            {"区分": "合計", "科目": "収益合計", "金額": revenue_total},
+            {"区分": "合計", "科目": "費用合計", "金額": expense_total},
+            {"区分": "合計", "科目": "当期利益", "金額": net_income},
+        ]
     )
+    return pd.concat([statement, totals], ignore_index=True)
 
-    customer = get_logged_in_customer()
-    if not customer:
-        render_login()
 
-    with st.sidebar:
-        st.header("アカウント")
-        st.markdown(f"**{customer['name']}**")
-        st.caption(customer["username"])
-        if st.button("ログアウト", width="stretch"):
-            logout_customer()
+def build_balance_sheet(trial_balance: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for category in ["資産", "負債", "純資産", "未分類"]:
+        category_df = trial_balance[trial_balance["区分"] == category]
+        for _, item in category_df.iterrows():
+            amount = int(item["残高"])
+            if category in ["負債", "純資産"]:
+                amount = -amount
+            rows.append({"区分": category, "科目": item["勘定科目"], "金額": amount})
 
-        st.divider()
-        model = DEFAULT_MODEL
-        transaction_limit = int(customer["transaction_limit"])
-        st.markdown(f"<span class=\"plan-pill\">{customer['plan_label']}</span>", unsafe_allow_html=True)
-        st.caption(f"上限：{transaction_limit} 取引/回")
-        st.caption(f"AIモデル：{model}")
-        st.divider()
-        st.info(get_config_value("UPGRADE_CONTACT", "上位プランをご希望の場合は管理者までお問い合わせください。"))
+    statement = pd.DataFrame(rows, columns=["区分", "科目", "金額"])
+    totals = []
+    for category in ["資産", "負債", "純資産", "未分類"]:
+        total = int(statement[statement["区分"] == category]["金額"].sum()) if not statement.empty else 0
+        totals.append({"区分": "合計", "科目": f"{category}合計", "金額": total})
+    return pd.concat([statement, pd.DataFrame(totals)], ignore_index=True)
 
+
+def build_financial_statement_excel(
+    ledger_df: pd.DataFrame,
+    trial_balance: pd.DataFrame,
+    profit_and_loss: pd.DataFrame,
+    balance_sheet: pd.DataFrame,
+    period_label: str,
+) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        ledger_df.to_excel(writer, index=False, sheet_name="取込仕訳")
+        trial_balance.to_excel(writer, index=False, sheet_name="試算表")
+        profit_and_loss.to_excel(writer, index=False, sheet_name="損益計算書")
+        balance_sheet.to_excel(writer, index=False, sheet_name="貸借対照表")
+        checklist_items = MONTHLY_CHECKLIST_ITEMS if period_label == "月次決算" else YEARLY_CHECKLIST_ITEMS
+        build_checklist(checklist_items, period_label).to_excel(writer, index=False, sheet_name="チェックリスト")
+
+        for sheet in writer.book.worksheets:
+            sheet.freeze_panes = "A2"
+            for column_cells in sheet.columns:
+                max_length = max(len(str(cell.value or "")) for cell in column_cells)
+                sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 38)
+    return output.getvalue()
+
+
+def render_bookkeeping_workspace(customer: dict, model: str, transaction_limit: int) -> None:
     overview_cols = st.columns(4)
     overview_cols[0].metric("現在のプラン", customer["plan_label"])
     overview_cols[1].metric("処理上限", f"{transaction_limit} 取引/回")
@@ -822,8 +967,8 @@ def main() -> None:
         st.markdown(
             """
             <div class="app-panel">
-                <div class="eyebrow">INPUT</div>
-                <div class="panel-title">証憑または取引内容</div>
+                <div class="eyebrow">BASIC BOOKKEEPING</div>
+                <div class="panel-title">証憑または取引内容から記帳</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -837,6 +982,7 @@ def main() -> None:
                 "領収書・請求書・明細画像",
                 type=["png", "jpg", "jpeg", "webp"],
                 accept_multiple_files=True,
+                key="bookkeeping_images",
             )
             if uploaded_files:
                 if len(uploaded_files) > transaction_limit:
@@ -853,6 +999,7 @@ def main() -> None:
                 "取引内容",
                 height=210,
                 placeholder=PLAN_TEXT_EXAMPLES.get(customer["plan_key"], PLAN_TEXT_EXAMPLES["free"]),
+                key="bookkeeping_text",
             )
 
         run = st.button("仕訳候補を作成", type="primary", width="stretch")
@@ -913,8 +1060,8 @@ def main() -> None:
                 """
                 <div class="app-panel-muted">
                     <div class="eyebrow">RESULT</div>
-                    <div class="panel-title">結果はここに表示されます</div>
-                    <p class="panel-copy">証憑画像または取引内容を入力して、仕訳候補を作成してください。</p>
+                    <div class="panel-title">仕訳候補はここに表示されます</div>
+                    <p class="panel-copy">証憑画像または取引内容を入力して、基本記帳を始めてください。</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -922,65 +1069,151 @@ def main() -> None:
             return
         df = st.session_state["df"]
         total_amount = int(pd.to_numeric(df["税込金額"], errors="coerce").fillna(0).sum()) if not df.empty else 0
-        st.markdown(
-            """
-            <div class="app-panel">
-                <div class="eyebrow">RESULT</div>
-                <div class="panel-title">仕訳候補</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
         c1, c2, c3 = st.columns(3)
         c1.metric("取引件数", f"{len(df)} 件")
         c2.metric("税込合計", f"{total_amount:,} 円")
         c3.metric("確認待ち", f"{len(df[df['ステータス'].astype(str).str.contains('確認', na=False)])} 件")
 
-        entry_tab, monthly_tab, yearly_tab = st.tabs(["仕訳一覧", "月次決算", "年次決算"])
-
-        with entry_tab:
-            edited_df = st.data_editor(df, num_rows="fixed", width="stretch", hide_index=True)
-            st.session_state["df"] = edited_df
-
-        current_df = st.session_state["df"]
-        monthly_summary, monthly_accounts, monthly_taxes = build_monthly_closing_report(current_df)
-        yearly_summary, yearly_accounts, yearly_pending = build_yearly_closing_report(current_df)
-
-        with monthly_tab:
-            st.markdown("#### 月次サマリー")
-            st.dataframe(monthly_summary, width="stretch", hide_index=True)
-            st.markdown("#### 科目別")
-            st.dataframe(monthly_accounts, width="stretch", hide_index=True)
-            st.markdown("#### 消費税区分別")
-            st.dataframe(monthly_taxes, width="stretch", hide_index=True)
-            with st.expander("月次決算チェックリスト", expanded=False):
-                st.dataframe(build_checklist(MONTHLY_CHECKLIST_ITEMS, "月次決算"), width="stretch", hide_index=True)
-
-        with yearly_tab:
-            st.markdown("#### 年次サマリー")
-            st.dataframe(yearly_summary, width="stretch", hide_index=True)
-            st.markdown("#### 科目別")
-            st.dataframe(yearly_accounts, width="stretch", hide_index=True)
-            st.markdown("#### 決算前の確認事項")
-            if yearly_pending.empty:
-                st.success("AI確認事項が残っている取引はありません。")
-            else:
-                st.dataframe(yearly_pending, width="stretch", hide_index=True)
-            with st.expander("年次決算チェックリスト", expanded=False):
-                st.dataframe(build_checklist(YEARLY_CHECKLIST_ITEMS, "年次決算"), width="stretch", hide_index=True)
-
+        edited_df = st.data_editor(df, num_rows="fixed", width="stretch", hide_index=True)
+        st.session_state["df"] = edited_df
         excel_bytes = build_excel(st.session_state["df"])
-        filename = f"ai_accounting_entries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        with st.expander("出力", expanded=True):
-            st.download_button(
-                "Excelをダウンロード",
-                data=excel_bytes,
-                file_name=filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                width="stretch",
-            )
-        with st.expander("AI JSONデータ"):
-            st.json(st.session_state.get("result", {}))
+        filename = f"bookkeeping_entries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        st.download_button(
+            "記帳・決算Excelをダウンロード",
+            data=excel_bytes,
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            width="stretch",
+        )
+
+
+def render_closing_workspace(period_label: str, transaction_limit: int) -> None:
+    st.markdown(
+        f"""
+        <div class="app-panel">
+            <div class="eyebrow">{period_label.upper()}</div>
+            <div class="panel-title">顧客の帳簿データから決算表・財務諸表を作成</div>
+            <p class="panel-copy">CSV / Excel の仕訳帳をアップロードするか、基本記帳で作成したデータを利用できます。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    source = st.radio("データ元", ["帳簿ファイルをアップロード", "基本記帳のデータを使う"], horizontal=True, key=f"{period_label}_source")
+    ledger_df = pd.DataFrame(columns=EXCEL_COLUMNS)
+
+    if source == "帳簿ファイルをアップロード":
+        uploaded_file = st.file_uploader(
+            "仕訳帳 CSV / Excel",
+            type=["csv", "xlsx", "xls"],
+            key=f"{period_label}_ledger_upload",
+        )
+        if uploaded_file is None:
+            st.info("顧客の仕訳帳ファイルをアップロードしてください。")
+            return
+        try:
+            ledger_df = read_accounting_upload(uploaded_file)
+        except Exception as exc:
+            st.error(f"ファイルを読み取れませんでした：{exc}")
+            return
+    else:
+        if "df" not in st.session_state:
+            st.info("まだ基本記帳データがありません。先に基本記帳を作成するか、帳簿ファイルをアップロードしてください。")
+            return
+        ledger_df = st.session_state["df"].copy()
+
+    if ledger_df.empty:
+        st.warning("決算表を作成できるデータがありません。")
+        return
+    if len(ledger_df) > transaction_limit and period_label == "月次決算":
+        st.warning(f"現在のプランの1回処理目安は{transaction_limit}取引です。大きな帳簿は上位プランをご検討ください。")
+
+    prepared_df = prepare_closing_dataframe(ledger_df)
+    selectable_periods = sorted(prepared_df["月"].dropna().unique()) if period_label == "月次決算" else sorted(prepared_df["年"].dropna().unique())
+    if selectable_periods:
+        selected_period = st.selectbox("対象期間", selectable_periods, index=len(selectable_periods) - 1)
+        if period_label == "月次決算":
+            ledger_df = prepared_df[prepared_df["月"] == selected_period][EXCEL_COLUMNS].copy()
+        else:
+            ledger_df = prepared_df[prepared_df["年"] == selected_period][EXCEL_COLUMNS].copy()
+
+    trial_balance = build_trial_balance(ledger_df)
+    profit_and_loss = build_profit_and_loss(trial_balance)
+    balance_sheet = build_balance_sheet(trial_balance)
+
+    total_debit = int(trial_balance["借方合計"].sum()) if not trial_balance.empty else 0
+    total_credit = int(trial_balance["貸方合計"].sum()) if not trial_balance.empty else 0
+    net_income_row = profit_and_loss[profit_and_loss["科目"] == "当期利益"]
+    net_income = int(net_income_row["金額"].iloc[0]) if not net_income_row.empty else 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("取引件数", f"{len(ledger_df)} 件")
+    m2.metric("借方合計", f"{total_debit:,} 円")
+    m3.metric("貸方合計", f"{total_credit:,} 円")
+    m4.metric("当期利益", f"{net_income:,} 円")
+
+    trial_tab, pl_tab, bs_tab, check_tab = st.tabs(["試算表", "損益計算書", "貸借対照表", "チェックリスト"])
+    with trial_tab:
+        st.dataframe(trial_balance, width="stretch", hide_index=True)
+    with pl_tab:
+        st.dataframe(profit_and_loss, width="stretch", hide_index=True)
+    with bs_tab:
+        st.dataframe(balance_sheet, width="stretch", hide_index=True)
+    with check_tab:
+        checklist = build_checklist(MONTHLY_CHECKLIST_ITEMS if period_label == "月次決算" else YEARLY_CHECKLIST_ITEMS, period_label)
+        st.dataframe(checklist, width="stretch", hide_index=True)
+
+    excel_bytes = build_financial_statement_excel(ledger_df, trial_balance, profit_and_loss, balance_sheet, period_label)
+    filename = f"{period_label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    st.download_button(
+        "決算表・財務諸表Excelをダウンロード",
+        data=excel_bytes,
+        file_name=filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch",
+    )
+
+
+def main() -> None:
+    st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
+    st.markdown(PAGE_CSS, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="app-header">
+            <div class="app-title">AI仕訳アシスタント</div>
+            <p class="app-subtitle">日本の中小企業・個人事業主向け。証憑画像または取引メモから仕訳候補を作成します。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    customer = get_logged_in_customer()
+    if not customer:
+        render_login()
+
+    with st.sidebar:
+        st.header("アカウント")
+        st.markdown(f"**{customer['name']}**")
+        st.caption(customer["username"])
+        if st.button("ログアウト", width="stretch"):
+            logout_customer()
+
+        st.divider()
+        model = DEFAULT_MODEL
+        transaction_limit = int(customer["transaction_limit"])
+        st.markdown(f"<span class=\"plan-pill\">{customer['plan_label']}</span>", unsafe_allow_html=True)
+        st.caption(f"上限：{transaction_limit} 取引/回")
+        st.caption(f"AIモデル：{model}")
+        st.divider()
+        st.info(get_config_value("UPGRADE_CONTACT", "上位プランをご希望の場合は管理者までお問い合わせください。"))
+
+    bookkeeping_tab, monthly_tab, yearly_tab = st.tabs(["基本記帳", "月次決算", "年次決算"])
+    with bookkeeping_tab:
+        render_bookkeeping_workspace(customer, model, transaction_limit)
+    with monthly_tab:
+        render_closing_workspace("月次決算", transaction_limit)
+    with yearly_tab:
+        render_closing_workspace("年次決算", transaction_limit)
 
 
 if __name__ == "__main__":
