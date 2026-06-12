@@ -59,25 +59,29 @@ PAGE_CSS = """
     }
     .block-container {
         max-width: 1180px;
-        padding-top: 1.65rem;
+        padding-top: 2.4rem;
         padding-bottom: 3rem;
     }
     .app-header {
-        padding-top: 0.35rem;
-        margin-bottom: 0.85rem;
+        border: 1px solid #263340;
+        border-radius: 8px;
+        background: #101820;
+        padding: 0.8rem 1rem 0.85rem 1rem;
+        margin: 0.2rem 0 0.9rem 0;
     }
     .app-title {
         color: #f8fafc;
-        font-size: 1.8rem;
-        line-height: 1.18;
+        font-size: 1.34rem;
+        line-height: 1.55;
         font-weight: 760;
-        margin: 0 0 0.25rem 0;
+        margin: 0;
+        padding: 0;
     }
     .app-subtitle {
         color: #a8b3c2;
         font-size: 0.9rem;
         line-height: 1.45;
-        margin: 0;
+        margin: 0.1rem 0 0 0;
     }
     h1, h2, h3, h4, h5, h6,
     [data-testid="stMarkdownContainer"] p,
