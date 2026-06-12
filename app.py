@@ -53,65 +53,100 @@ PLAN_TEXT_EXAMPLES = {
 
 PAGE_CSS = """
 <style>
+    .stApp {
+        background: #0b1014;
+        color: #e5edf5;
+    }
     .block-container {
         max-width: 1180px;
         padding-top: 2.2rem;
         padding-bottom: 3rem;
     }
+    h1, h2, h3, h4, h5, h6,
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li {
+        color: #e5edf5;
+    }
     div[data-testid="stMetric"] {
-        background: #ffffff;
-        border: 1px solid #e5e7eb;
+        background: #121a21;
+        border: 1px solid #2a3642;
         border-radius: 8px;
-        padding: 0.85rem 1rem;
+        padding: 0.9rem 1rem;
+        box-shadow: none;
     }
     div[data-testid="stMetric"] label {
-        color: #64748b;
+        color: #a8b3c2 !important;
+        font-weight: 650;
+    }
+    div[data-testid="stMetricValue"] {
+        color: #f8fafc !important;
+        font-weight: 750;
+    }
+    div[data-testid="stMetricValue"] > div {
+        color: #f8fafc !important;
     }
     section[data-testid="stSidebar"] {
-        border-right: 1px solid #e5e7eb;
+        background: #10161d;
+        border-right: 1px solid #24303a;
+    }
+    section[data-testid="stSidebar"] * {
+        color: #e5edf5;
     }
     .app-panel {
-        border: 1px solid #e5e7eb;
+        border: 1px solid #2a3642;
         border-radius: 8px;
         padding: 1rem 1.1rem;
-        background: #ffffff;
+        background: #121a21;
         margin-bottom: 1rem;
     }
     .app-panel-muted {
-        border: 1px solid #e5e7eb;
+        border: 1px solid #263340;
         border-radius: 8px;
         padding: 1rem 1.1rem;
-        background: #f8fafc;
+        background: #0f171e;
         margin-bottom: 1rem;
     }
     .eyebrow {
-        color: #64748b;
+        color: #7dd3fc;
         font-size: 0.82rem;
         font-weight: 700;
         letter-spacing: 0;
         margin-bottom: 0.25rem;
     }
     .panel-title {
-        color: #0f172a;
+        color: #f8fafc;
         font-size: 1.08rem;
         font-weight: 700;
         margin-bottom: 0.2rem;
     }
     .panel-copy {
-        color: #475569;
+        color: #cbd5e1;
         font-size: 0.94rem;
         line-height: 1.55;
         margin: 0;
     }
     .plan-pill {
         display: inline-block;
-        border: 1px solid #cbd5e1;
+        border: 1px solid #2dd4bf;
         border-radius: 999px;
         padding: 0.2rem 0.55rem;
-        color: #334155;
-        background: #f8fafc;
+        color: #ccfbf1;
+        background: #102a2a;
         font-size: 0.82rem;
         font-weight: 600;
+    }
+    div[data-testid="stAlert"] {
+        border-radius: 8px;
+    }
+    div[data-testid="stDataFrame"],
+    div[data-testid="stDataEditor"] {
+        border: 1px solid #2a3642;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    textarea,
+    input {
+        color: #f8fafc !important;
     }
 </style>
 """
