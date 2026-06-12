@@ -23,14 +23,18 @@ copy .env.example .env
 ```text
 OPENAI_API_KEY=your_api_key
 OPENAI_MODEL=gpt-4o
+UPGRADE_CONTACT=上位プランをご希望の場合は example@example.com までお問い合わせください。
 CUSTOMER_ACCOUNTS={"demo@example.com":{"password":"demo-pass","plan":"starter","name":"Demo Company"}}
 ```
 
-本番では顧客アカウントを Streamlit Cloud の Secrets に設定してください。例：
+ユーザーはログイン画面から自助で無料登録できます。登録直後のプランは必ず `free` です。上位プランに変更したいユーザーには、画面に表示される `UPGRADE_CONTACT` の連絡先から問い合わせてもらいます。
+
+本番では OpenAI Key と問い合わせ先を Streamlit Cloud の Secrets に設定してください。必要に応じて、有料顧客アカウントも Secrets に設定できます。例：
 
 ```toml
 OPENAI_API_KEY = "your_api_key"
 OPENAI_MODEL = "gpt-4o"
+UPGRADE_CONTACT = "上位プランをご希望の場合は your-email@example.com までお問い合わせください。"
 CUSTOMER_ACCOUNTS = '{"demo@example.com":{"password":"demo-pass","plan":"starter","name":"Demo Company"}}'
 ```
 
@@ -49,6 +53,8 @@ name = "Demo Accounting Firm"
 ```
 
 顧客にはユーザーIDとパスワードを渡してください。ログインに成功した顧客だけがアプリを利用でき、顧客ごとの `plan` に応じて一度に処理できる取引件数が制限されます。画像アップロードだけでなく、テキスト入力で複数取引を書いた場合も同じ上限が適用されます。
+
+自助登録ユーザーは `customer_accounts.json` に保存されます。このファイルは `.gitignore` に含まれているため、GitHub にはコミットされません。Streamlit Cloud の無料環境では、再デプロイや環境リセット時にローカルファイルが失われる可能性があります。本格運用ではデータベース連携を推奨します。
 
 利用できる `plan` は次の通りです。
 

@@ -1,4 +1,5 @@
 .env
+customer_accounts.json
 __pycache__/
 *.pyc
 exports/

@@ -1,9 +1,12 @@
 import base64
+import hashlib
 import hmac
 import io
 import json
 import os
+import secrets as token_secrets
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -15,6 +18,7 @@ load_dotenv()
 
 APP_TITLE = "AI仕訳アシスタント（日本の中小企業・個人事業主向け）"
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+CUSTOMER_DB_PATH = Path(os.getenv("CUSTOMER_DB_PATH", "customer_accounts.json"))
 PLAN_CONFIG = {
     "free": {"label": "無料プラン", "limit": 1},
     "starter": {"label": "スタータープラン", "limit": 5},
@@ -155,8 +159,48 @@ def get_config_value(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+def hash_password(password: str, salt: str | None = None) -> str:
+    salt = salt or token_secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120000)
+    return f"pbkdf2_sha256${salt}${digest.hex()}"
+
+
+def verify_password(password: str, profile: dict) -> bool:
+    password_hash = str(profile.get("password_hash", ""))
+    if password_hash.startswith("pbkdf2_sha256$"):
+        try:
+            _, salt, expected = password_hash.split("$", 2)
+        except ValueError:
+            return False
+        actual = hash_password(password, salt).split("$", 2)[2]
+        return hmac.compare_digest(actual, expected)
+
+    plain_password = str(profile.get("password", ""))
+    return bool(plain_password) and hmac.compare_digest(password, plain_password)
+
+
+def load_registered_customer_accounts() -> dict[str, dict]:
+    if not CUSTOMER_DB_PATH.exists():
+        return {}
+
+    try:
+        with CUSTOMER_DB_PATH.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
+def save_registered_customer_accounts(customers: dict[str, dict]) -> None:
+    CUSTOMER_DB_PATH.write_text(
+        json.dumps(customers, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def load_customer_accounts() -> dict[str, dict]:
-    customers: dict[str, dict] = {}
+    customers: dict[str, dict] = load_registered_customer_accounts()
 
     raw_customers = get_config_value("CUSTOMER_ACCOUNTS")
     if raw_customers:
@@ -180,11 +224,15 @@ def load_customer_accounts() -> dict[str, dict]:
 
         plan_key = str(profile.get("plan", "free")).strip()
         password = str(profile.get("password", ""))
-        if not username or not password or plan_key not in PLAN_CONFIG:
+        password_hash = str(profile.get("password_hash", ""))
+        if not username or plan_key not in PLAN_CONFIG:
+            continue
+        if not password and not password_hash:
             continue
 
         normalized[str(username).strip()] = {
             "password": password,
+            "password_hash": password_hash,
             "plan": plan_key,
             "name": str(profile.get("name", username)).strip() or str(username),
         }
@@ -199,7 +247,7 @@ def authenticate_customer(username: str, password: str) -> dict | None:
 
     if not profile:
         return None
-    if not hmac.compare_digest(password, profile["password"]):
+    if not verify_password(password, profile):
         return None
 
     plan_key = profile["plan"]
@@ -210,6 +258,34 @@ def authenticate_customer(username: str, password: str) -> dict | None:
         "plan_label": PLAN_CONFIG[plan_key]["label"],
         "transaction_limit": PLAN_CONFIG[plan_key]["limit"],
     }
+
+
+def register_free_customer(username: str, password: str, name: str) -> tuple[bool, str]:
+    username = (username or "").strip().lower()
+    name = (name or "").strip() or username
+    password = password or ""
+
+    if not username or "@" not in username:
+        return False, "メールアドレスを入力してください。"
+    if len(password) < 8:
+        return False, "パスワードは8文字以上で入力してください。"
+    if username in load_customer_accounts():
+        return False, "このメールアドレスはすでに登録されています。"
+
+    registered_customers = load_registered_customer_accounts()
+    registered_customers[username] = {
+        "password_hash": hash_password(password),
+        "plan": "free",
+        "name": name,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+    try:
+        save_registered_customer_accounts(registered_customers)
+    except OSError:
+        return False, "登録情報を保存できませんでした。管理者にお問い合わせください。"
+
+    return True, "無料プランで登録しました。"
 
 
 def get_logged_in_customer() -> dict | None:
@@ -226,24 +302,48 @@ def logout_customer() -> None:
 
 
 def render_login() -> None:
-    if not load_customer_accounts():
-        st.error("顧客アカウントが設定されていません。管理者が Streamlit Secrets に customers を設定してください。")
-        st.stop()
+    upgrade_contact = get_config_value("UPGRADE_CONTACT", "上位プランをご希望の場合は管理者までお問い合わせください。")
+    login_tab, register_tab = st.tabs(["ログイン", "無料登録"])
 
-    st.subheader("ログイン")
-    with st.form("customer_login_form"):
-        username = st.text_input("メールアドレス / ユーザーID")
-        password = st.text_input("パスワード", type="password")
-        submitted = st.form_submit_button("ログイン", type="primary", width="stretch")
+    with login_tab:
+        st.subheader("ログイン")
+        with st.form("customer_login_form"):
+            username = st.text_input("メールアドレス / ユーザーID")
+            password = st.text_input("パスワード", type="password")
+            submitted = st.form_submit_button("ログイン", type="primary", width="stretch")
 
-    if submitted:
-        customer = authenticate_customer(username, password)
-        if customer:
-            st.session_state["customer"] = customer
-            st.rerun()
-        st.error("ユーザーIDまたはパスワードが正しくありません。")
+        if submitted:
+            customer = authenticate_customer(username, password)
+            if customer:
+                st.session_state["customer"] = customer
+                st.rerun()
+            st.error("ユーザーIDまたはパスワードが正しくありません。")
 
-    st.info("アカウントをお持ちでない場合は、管理者から発行されたログイン情報をご利用ください。")
+    with register_tab:
+        st.subheader("無料プランで登録")
+        st.caption("登録直後は無料プランです。上位プランへの変更はお問い合わせください。")
+        with st.form("customer_register_form"):
+            register_name = st.text_input("会社名 / お名前")
+            register_email = st.text_input("メールアドレス")
+            register_password = st.text_input("パスワード（8文字以上）", type="password")
+            register_password_confirm = st.text_input("パスワード確認", type="password")
+            registered = st.form_submit_button("無料登録して始める", type="primary", width="stretch")
+
+        if registered:
+            if register_password != register_password_confirm:
+                st.error("確認用パスワードが一致しません。")
+            else:
+                success, message = register_free_customer(register_email, register_password, register_name)
+                if success:
+                    customer = authenticate_customer(register_email, register_password)
+                    if customer:
+                        st.session_state["customer"] = customer
+                        st.success(message)
+                        st.rerun()
+                else:
+                    st.error(message)
+
+    st.info(upgrade_contact)
     st.stop()
 
 
@@ -384,6 +484,7 @@ def main() -> None:
         st.info(f"現在のプラン：{customer['plan_label']}")
         st.caption(f"AIモデル：{model}")
         st.caption(f"このプランでは一度に最大 {transaction_limit} 件の取引まで処理できます。")
+        st.info(get_config_value("UPGRADE_CONTACT", "上位プランをご希望の場合は管理者までお問い合わせください。"))
         st.warning("AIによる参考判定です。最終的な会計・税務判断は税理士へ確認してください。")
 
     left, right = st.columns([0.85, 1.15])
