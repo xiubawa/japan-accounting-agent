@@ -67,7 +67,9 @@ PAGE_CSS = """
         border-radius: 8px;
         background: #101820;
         padding: 0.8rem 1rem 0.85rem 1rem;
-        margin: 0.2rem 0 0.9rem 0;
+        margin: 0.2rem auto 0.9rem auto;
+        max-width: 760px;
+        text-align: center;
     }
     .app-title {
         color: #f8fafc;
