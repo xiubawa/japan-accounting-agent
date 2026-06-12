@@ -18,7 +18,7 @@ APP_TITLE = "AI経理アシスタント（OCRオフライン版）"
 EXCEL_COLUMNS = [
     "取引日", "証憑日付", "取引先", "摘要", "借方勘定科目", "借方補助科目", "借方金額", "借方税区分",
     "貸方勘定科目", "貸方補助科目", "貸方金額", "貸方税区分", "税込金額", "税抜金額", "消費税率",
-    "消費税額", "支払方法", "インボイス登録番号", "証憑種類", "ステータス", "信頼度", "確認事項",
+    "消費税額", "支払方法", "インボイス登録番号", "証憑種類", "ステータス", "信頼度", "確認事項","元ファイル名",
 ]
 
 
@@ -345,6 +345,9 @@ def main() -> None:
     left, right = st.columns([0.9, 1.1])
     with left:
         uploaded_file = st.file_uploader("領収書・請求書・明細画像をアップロード", type=["png", "jpg", "jpeg", "webp"])
+accept_multiple_files=True,
+if uploaded_files:
+    st.success(f"{len(uploaded_files)}件の証憑をアップロードしました")
         text_input = st.text_area(
             "取引内容を入力",
             height=180,
@@ -359,10 +362,26 @@ def main() -> None:
             return
         with st.spinner("OCR解析および仕訳生成中..."):
             try:
-                result = make_transaction(text_input, uploaded_file)
-                st.session_state["result"] = result
-                st.session_state["df"] = transactions_to_dataframe(result)
-            except Exception as exc:
+               all_results = []
+               all_dfs = []
+
+               for uploaded_file in uploaded_files:
+
+                     result = make_transaction("", uploaded_file)
+
+                     df = transactions_to_dataframe(result)
+
+                     if not df.empty:
+                          df["元ファイル名"] = uploaded_file.name
+
+                    all_results.append(result)
+                    all_dfs.append(df)
+
+              if all_dfs:
+                   merged_df = pd.concat(all_dfs, ignore_index=True)
+
+                   st.session_state["result"] = all_results
+                   st.session_state["df"] = merged_df            except Exception as exc:
                 st.error(f"エラーが発生しました：{exc}")
                 return
     with right:
