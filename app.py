@@ -20,6 +20,7 @@ load_dotenv()
 APP_TITLE = "AI仕訳アシスタント（日本の中小企業・個人事業主向け）"
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 CUSTOMER_DB_PATH = Path(os.getenv("CUSTOMER_DB_PATH", "customer_accounts.json"))
+LEDGER_STORAGE_DIR = Path(os.getenv("LEDGER_STORAGE_DIR", "customer_ledgers"))
 PLAN_CONFIG = {
     "free": {"label": "無料プラン", "limit": 1},
     "starter": {"label": "スタータープラン", "limit": 5},
@@ -874,6 +875,55 @@ def normalize_uploaded_ledger(raw_df: pd.DataFrame) -> pd.DataFrame:
     return normalized[EXCEL_COLUMNS]
 
 
+def get_customer_ledger_path(customer: dict) -> Path:
+    username = str(customer.get("username", "anonymous"))
+    digest = hashlib.sha256(username.encode("utf-8")).hexdigest()[:24]
+    return LEDGER_STORAGE_DIR / f"{digest}.json"
+
+
+def load_customer_ledger(customer: dict) -> pd.DataFrame:
+    path = get_customer_ledger_path(customer)
+    if not path.exists():
+        return pd.DataFrame(columns=EXCEL_COLUMNS)
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return pd.DataFrame(columns=EXCEL_COLUMNS)
+
+    if not isinstance(data, list):
+        return pd.DataFrame(columns=EXCEL_COLUMNS)
+
+    df = pd.DataFrame(data)
+    for column in EXCEL_COLUMNS:
+        if column not in df.columns:
+            df[column] = ""
+    return df[EXCEL_COLUMNS]
+
+
+def save_customer_ledger(customer: dict, df: pd.DataFrame) -> None:
+    LEDGER_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    clean_df = normalize_uploaded_ledger(df)
+    path = get_customer_ledger_path(customer)
+    path.write_text(clean_df.to_json(orient="records", force_ascii=False, indent=2), encoding="utf-8")
+
+
+def append_customer_ledger(customer: dict, df: pd.DataFrame) -> int:
+    if df.empty:
+        return len(load_customer_ledger(customer))
+
+    existing_df = load_customer_ledger(customer)
+    merged_df = pd.concat([existing_df, normalize_uploaded_ledger(df)], ignore_index=True)
+    save_customer_ledger(customer, merged_df)
+    return len(merged_df)
+
+
+def clear_customer_ledger(customer: dict) -> None:
+    path = get_customer_ledger_path(customer)
+    if path.exists():
+        path.unlink()
+
+
 def build_trial_balance(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["区分", "勘定科目", "借方合計", "貸方合計", "残高"])
@@ -1077,6 +1127,31 @@ def render_bookkeeping_workspace(customer: dict, model: str, transaction_limit: 
 
         edited_df = st.data_editor(df, num_rows="fixed", width="stretch", hide_index=True)
         st.session_state["df"] = edited_df
+
+        saved_ledger = load_customer_ledger(customer)
+        s1, s2 = st.columns(2)
+        s1.metric("保存済み帳簿", f"{len(saved_ledger)} 件")
+        if s2.button("この仕訳を保存済み帳簿に追加", width="stretch"):
+            total_saved = append_customer_ledger(customer, st.session_state["df"])
+            st.success(f"保存しました。保存済み帳簿は合計 {total_saved} 件です。月次決算・年次決算で利用できます。")
+
+        with st.expander("保存済み帳簿の管理"):
+            saved_ledger = load_customer_ledger(customer)
+            st.dataframe(saved_ledger, width="stretch", hide_index=True)
+            ledger_excel = build_excel(saved_ledger) if not saved_ledger.empty else b""
+            if not saved_ledger.empty:
+                st.download_button(
+                    "保存済み帳簿をExcelでダウンロード",
+                    data=ledger_excel,
+                    file_name=f"saved_ledger_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    width="stretch",
+                )
+            if st.button("保存済み帳簿をクリア", width="stretch"):
+                clear_customer_ledger(customer)
+                st.success("保存済み帳簿をクリアしました。")
+                st.rerun()
+
         excel_bytes = build_excel(st.session_state["df"])
         filename = f"bookkeeping_entries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         st.download_button(
@@ -1088,19 +1163,19 @@ def render_bookkeeping_workspace(customer: dict, model: str, transaction_limit: 
         )
 
 
-def render_closing_workspace(period_label: str, transaction_limit: int) -> None:
+def render_closing_workspace(period_label: str, transaction_limit: int, customer: dict) -> None:
     st.markdown(
         f"""
         <div class="app-panel">
             <div class="eyebrow">{period_label.upper()}</div>
             <div class="panel-title">顧客の帳簿データから決算表・財務諸表を作成</div>
-            <p class="panel-copy">CSV / Excel の仕訳帳をアップロードするか、基本記帳で作成したデータを利用できます。</p>
+            <p class="panel-copy">CSV / Excel の仕訳帳をアップロードするか、基本記帳で保存した帳簿を利用できます。</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    source = st.radio("データ元", ["帳簿ファイルをアップロード", "基本記帳のデータを使う"], horizontal=True, key=f"{period_label}_source")
+    source = st.radio("データ元", ["帳簿ファイルをアップロード", "保存済み帳簿を使う"], horizontal=True, key=f"{period_label}_source")
     ledger_df = pd.DataFrame(columns=EXCEL_COLUMNS)
 
     if source == "帳簿ファイルをアップロード":
@@ -1126,10 +1201,11 @@ def render_closing_workspace(period_label: str, transaction_limit: int) -> None:
             st.error(f"ファイルを読み取れませんでした：{exc}")
             return
     else:
-        if "df" not in st.session_state:
-            st.info("まだ基本記帳データがありません。先に基本記帳を作成するか、帳簿ファイルをアップロードしてください。")
+        ledger_df = load_customer_ledger(customer)
+        if ledger_df.empty:
+            st.info("保存済み帳簿がありません。基本記帳で仕訳を保存するか、帳簿ファイルをアップロードしてください。")
             return
-        ledger_df = st.session_state["df"].copy()
+        st.success(f"保存済み帳簿 {len(ledger_df)} 件を読み込みました。")
 
     if ledger_df.empty:
         st.warning("決算表を作成できるデータがありません。")
@@ -1220,9 +1296,9 @@ def main() -> None:
     with bookkeeping_tab:
         render_bookkeeping_workspace(customer, model, transaction_limit)
     with monthly_tab:
-        render_closing_workspace("月次決算", transaction_limit)
+        render_closing_workspace("月次決算", transaction_limit, customer)
     with yearly_tab:
-        render_closing_workspace("年次決算", transaction_limit)
+        render_closing_workspace("年次決算", transaction_limit, customer)
 
 
 if __name__ == "__main__":
