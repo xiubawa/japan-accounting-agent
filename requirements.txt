@@ -3,7 +3,4 @@ pandas
 openpyxl
 pillow
 python-dotenv
-easyocr
-opencv-python-headless
-torch
-torchvision
+openai
