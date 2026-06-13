@@ -30,6 +30,52 @@ PLAN_CONFIG = {
     "accounting_firm": {"label": "会計事務所プラン", "limit": 50},
 }
 
+ACCOUNT_CODE_TABLE = [
+    ("110", "現金"),
+    ("120", "当座預金"),
+    ("130", "普通預金"),
+    ("150", "受取手形"),
+    ("155", "売掛金"),
+    ("170", "繰越商品"),
+    ("180", "未収入金"),
+    ("185", "仮払消費税"),
+    ("210", "建物"),
+    ("220", "備品"),
+    ("240", "減価償却累計額"),
+    ("310", "支払手形"),
+    ("315", "買掛金"),
+    ("320", "預り金"),
+    ("325", "未払費用"),
+    ("327", "未払消費税"),
+    ("330", "仮受消費税"),
+    ("360", "長期借入金"),
+    ("410", "資本金"),
+    ("420", "前期繰越損益"),
+    ("510", "売上高"),
+    ("520", "売上値引"),
+    ("530", "受取利息"),
+    ("610", "仕入高"),
+    ("620", "給料手当"),
+    ("630", "法定福利費"),
+    ("640", "旅費交通費"),
+    ("650", "通信費"),
+    ("660", "水道光熱費"),
+    ("670", "広告宣伝費"),
+    ("680", "接待交際費"),
+    ("690", "会議費"),
+    ("700", "福利厚生費"),
+    ("710", "外注費"),
+    ("720", "支払手数料"),
+    ("730", "支払報酬料"),
+    ("740", "地代家賃"),
+    ("750", "租税公課"),
+    ("760", "保険料"),
+    ("770", "消耗品費"),
+    ("780", "荷造運賃"),
+    ("790", "減価償却費"),
+    ("800", "雑費"),
+]
+
 PLAN_TEXT_EXAMPLES = {
     "free": "例：2026年6月10日、法人カードでAmazon Japanへ11,000円支払い。キーボードとマウスを購入。消費税10%、適格請求書取得済み。",
     "starter": "\n".join([
@@ -769,11 +815,12 @@ def build_excel(df: pd.DataFrame) -> bytes:
         workbook = writer.book
         add_cover_sheet(workbook, "基本記帳・決算補助")
         add_financial_summary_sheet(workbook, "基本記帳・決算補助")
+        add_worksheet_sheet(workbook, build_trial_balance(df), "対象期間")
         apply_financial_report_format(workbook)
         for sheet in workbook.worksheets:
-            for column_cells in sheet.columns:
+            for column_index, column_cells in enumerate(sheet.columns, start=1):
                 max_length = max(len(str(cell.value or "")) for cell in column_cells)
-                sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 38)
+                sheet.column_dimensions[get_column_letter(column_index)].width = min(max(max_length + 2, 12), 38)
     return output.getvalue()
 
 
@@ -1089,9 +1136,105 @@ def add_financial_summary_sheet(workbook, period_label: str) -> None:
     sheet.column_dimensions["E"].width = 48
 
 
+def add_worksheet_sheet(workbook, trial_balance: pd.DataFrame, period_label: str) -> None:
+    sheet = workbook.create_sheet("精算表", 2)
+    sheet.sheet_view.showGridLines = False
+    sheet.freeze_panes = "A5"
+
+    sheet.merge_cells("A1:I2")
+    sheet["A1"] = "精　算　表"
+    sheet["A1"].font = Font(size=18, bold=True, color="1E3A8A")
+    sheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    sheet["A1"].fill = PatternFill("solid", fgColor="F2DCDB")
+
+    sheet["C3"] = "試算表"
+    sheet["C4"] = f"{period_label}残高"
+    sheet.merge_cells("D3:E3")
+    sheet["D3"] = "修正記入"
+    sheet["D4"] = "借方"
+    sheet["E4"] = "貸方"
+    sheet.merge_cells("F3:G3")
+    sheet["F3"] = "損益計算書"
+    sheet["F4"] = "借方"
+    sheet["G4"] = "貸方"
+    sheet.merge_cells("H3:I3")
+    sheet["H3"] = "貸借対照表"
+    sheet["H4"] = "借方"
+    sheet["I4"] = "貸方"
+    sheet["A4"] = "コード"
+    sheet["B4"] = "勘定科目"
+
+    header_fills = {
+        "C3:C3": "D9EAD3",
+        "D3:E3": "CFE2F3",
+        "F3:G3": "D9D2E9",
+        "H3:I3": "FCE5CD",
+    }
+    for cell_range, color in header_fills.items():
+        fill = PatternFill("solid", fgColor=color)
+        for row in sheet[cell_range]:
+            for cell in row:
+                cell.fill = fill
+
+    trial_map = {
+        str(row["勘定科目"]): {
+            "区分": row["区分"],
+            "残高": int(row["残高"]),
+        }
+        for _, row in trial_balance.iterrows()
+    }
+
+    start_row = 5
+    for idx, (code, account) in enumerate(ACCOUNT_CODE_TABLE, start=start_row):
+        info = trial_map.get(account, {"区分": classify_account(account), "残高": 0})
+        category = info["区分"]
+        balance = int(info["残高"])
+        debit_balance = balance if balance > 0 else 0
+        credit_balance = -balance if balance < 0 else 0
+
+        sheet[f"A{idx}"] = code
+        sheet[f"B{idx}"] = account
+        sheet[f"C{idx}"] = debit_balance if debit_balance else credit_balance
+
+        if category == "費用":
+            sheet[f"F{idx}"] = debit_balance
+            sheet[f"G{idx}"] = credit_balance
+        elif category == "収益":
+            sheet[f"F{idx}"] = debit_balance
+            sheet[f"G{idx}"] = credit_balance
+        elif category == "資産":
+            sheet[f"H{idx}"] = debit_balance
+            sheet[f"I{idx}"] = credit_balance
+        elif category in ["負債", "純資産"]:
+            sheet[f"H{idx}"] = debit_balance
+            sheet[f"I{idx}"] = credit_balance
+
+    total_row = start_row + len(ACCOUNT_CODE_TABLE)
+    sheet[f"B{total_row}"] = "合計"
+    for col in ["C", "D", "E", "F", "G", "H", "I"]:
+        sheet[f"{col}{total_row}"] = f"=SUM({col}{start_row}:{col}{total_row - 1})"
+
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for row in sheet.iter_rows(min_row=3, max_row=total_row, min_col=1, max_col=9):
+        for cell in row:
+            cell.border = border
+            cell.alignment = Alignment(vertical="center")
+            if cell.row in [3, 4] or cell.row == total_row:
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            if isinstance(cell.value, (int, float)) or (isinstance(cell.value, str) and cell.value.startswith("=")):
+                cell.number_format = '#,##0;[Red]-#,##0;-'
+
+    sheet.column_dimensions["A"].width = 10
+    sheet.column_dimensions["B"].width = 22
+    for col in ["C", "D", "E", "F", "G", "H", "I"]:
+        sheet.column_dimensions[col].width = 14
+
+
 def apply_financial_report_format(workbook) -> None:
     for sheet in workbook.worksheets:
-        if sheet.title not in ["表紙", "財務サマリー"]:
+        if sheet.title not in ["表紙", "財務サマリー", "精算表"]:
             style_excel_sheet(sheet)
 
     for sheet_name in ["損益計算書", "貸借対照表", "試算表"]:
@@ -1126,12 +1269,13 @@ def build_financial_statement_excel(
         workbook = writer.book
         add_cover_sheet(workbook, period_label)
         add_financial_summary_sheet(workbook, period_label)
+        add_worksheet_sheet(workbook, trial_balance, period_label)
         apply_financial_report_format(workbook)
 
         for sheet in workbook.worksheets:
-            for column_cells in sheet.columns:
+            for column_index, column_cells in enumerate(sheet.columns, start=1):
                 max_length = max(len(str(cell.value or "")) for cell in column_cells)
-                sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 38)
+                sheet.column_dimensions[get_column_letter(column_index)].width = min(max(max_length + 2, 12), 38)
     return output.getvalue()
 
 
