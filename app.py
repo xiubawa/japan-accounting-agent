@@ -12,6 +12,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 from openai import OpenAI
 from PIL import Image
 
@@ -765,8 +767,10 @@ def build_excel(df: pd.DataFrame) -> bytes:
         ])
         summary.to_excel(writer, index=False, sheet_name="集計")
         workbook = writer.book
+        add_cover_sheet(workbook, "基本記帳・決算補助")
+        add_financial_summary_sheet(workbook, "基本記帳・決算補助")
+        apply_financial_report_format(workbook)
         for sheet in workbook.worksheets:
-            sheet.freeze_panes = "A2"
             for column_cells in sheet.columns:
                 max_length = max(len(str(cell.value or "")) for cell in column_cells)
                 sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 38)
@@ -981,6 +985,128 @@ def build_balance_sheet(trial_balance: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([statement, pd.DataFrame(totals)], ignore_index=True)
 
 
+def style_excel_sheet(sheet, freeze: str = "A2") -> None:
+    header_fill = PatternFill("solid", fgColor="0F172A")
+    header_font = Font(color="FFFFFF", bold=True)
+    border_color = "CBD5E1"
+    thin_border = Border(
+        left=Side(style="thin", color=border_color),
+        right=Side(style="thin", color=border_color),
+        top=Side(style="thin", color=border_color),
+        bottom=Side(style="thin", color=border_color),
+    )
+
+    sheet.sheet_view.showGridLines = False
+    if freeze:
+        sheet.freeze_panes = freeze
+
+    max_row = sheet.max_row or 1
+    max_column = sheet.max_column or 1
+
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+
+    for row in sheet.iter_rows(min_row=2, max_row=max_row, max_col=max_column):
+        for cell in row:
+            cell.border = thin_border
+            cell.alignment = Alignment(vertical="center")
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = '#,##0;[Red]-#,##0;-'
+
+    for column_idx in range(1, max_column + 1):
+        column_letter = get_column_letter(column_idx)
+        max_length = 0
+        for cell in sheet[column_letter]:
+            max_length = max(max_length, len(str(cell.value or "")))
+        sheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 42)
+
+
+def add_cover_sheet(workbook, period_label: str) -> None:
+    sheet = workbook.create_sheet("表紙", 0)
+    sheet.sheet_view.showGridLines = False
+    sheet["B2"] = "財務報告書"
+    sheet["B3"] = period_label
+    sheet["B5"] = "作成日時"
+    sheet["C5"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sheet["B7"] = "含まれる帳票"
+    reports = ["財務サマリー", "試算表", "損益計算書", "貸借対照表", "チェックリスト", "取込仕訳"]
+    for idx, report in enumerate(reports, start=8):
+        sheet[f"B{idx}"] = report
+    sheet["B16"] = "注意"
+    sheet["C16"] = "AIとルールによる参考資料です。決算・申告の最終判断は税理士へ確認してください。"
+
+    sheet["B2"].font = Font(size=22, bold=True, color="0F172A")
+    sheet["B3"].font = Font(size=14, bold=True, color="2563EB")
+    for cell_ref in ["B5", "B7", "B16"]:
+        sheet[cell_ref].font = Font(bold=True, color="334155")
+    sheet.column_dimensions["B"].width = 18
+    sheet.column_dimensions["C"].width = 72
+
+
+def add_financial_summary_sheet(workbook, period_label: str) -> None:
+    sheet = workbook.create_sheet("財務サマリー", 1)
+    sheet.sheet_view.showGridLines = False
+    sheet["B2"] = "財務サマリー"
+    sheet["C2"] = period_label
+
+    rows = [
+        ("売上高", '=SUMIF(損益計算書!A:A,"収益",損益計算書!C:C)'),
+        ("費用合計", '=SUMIF(損益計算書!B:B,"費用合計",損益計算書!C:C)'),
+        ("当期利益", '=SUMIF(損益計算書!B:B,"当期利益",損益計算書!C:C)'),
+        ("資産合計", '=SUMIF(貸借対照表!B:B,"資産合計",貸借対照表!C:C)'),
+        ("負債合計", '=SUMIF(貸借対照表!B:B,"負債合計",貸借対照表!C:C)'),
+        ("純資産合計", '=SUMIF(貸借対照表!B:B,"純資産合計",貸借対照表!C:C)'),
+        ("B/S差額チェック", '=C6-C7-C8'),
+    ]
+    sheet["B4"] = "指標"
+    sheet["C4"] = "金額"
+    for row_idx, (label, formula) in enumerate(rows, start=5):
+        sheet[f"B{row_idx}"] = label
+        sheet[f"C{row_idx}"] = formula
+
+    sheet["E4"] = "確認ポイント"
+    notes = [
+        "B/S差額チェックが0に近いか確認",
+        "未分類科目がある場合は科目分類を確認",
+        "確認事項シートと原本証憑を照合",
+        "税区分・インボイス登録番号は税理士確認",
+    ]
+    for row_idx, note in enumerate(notes, start=5):
+        sheet[f"E{row_idx}"] = note
+
+    sheet["B2"].font = Font(size=18, bold=True, color="0F172A")
+    sheet["C2"].font = Font(size=12, bold=True, color="2563EB")
+    for cell_ref in ["B4", "C4", "E4"]:
+        sheet[cell_ref].fill = PatternFill("solid", fgColor="0F172A")
+        sheet[cell_ref].font = Font(color="FFFFFF", bold=True)
+    for row in range(5, 12):
+        sheet[f"C{row}"].number_format = '#,##0;[Red]-#,##0;-'
+    sheet.column_dimensions["B"].width = 22
+    sheet.column_dimensions["C"].width = 18
+    sheet.column_dimensions["E"].width = 48
+
+
+def apply_financial_report_format(workbook) -> None:
+    for sheet in workbook.worksheets:
+        if sheet.title not in ["表紙", "財務サマリー"]:
+            style_excel_sheet(sheet)
+
+    for sheet_name in ["損益計算書", "貸借対照表", "試算表"]:
+        if sheet_name not in workbook.sheetnames:
+            continue
+        sheet = workbook[sheet_name]
+        for row in sheet.iter_rows(min_row=2):
+            first_value = str(row[0].value or "")
+            second_value = str(row[1].value or "") if len(row) > 1 else ""
+            if first_value == "合計" or second_value.endswith("合計") or second_value == "当期利益":
+                for cell in row:
+                    cell.font = Font(bold=True, color="0F172A")
+                    cell.fill = PatternFill("solid", fgColor="E2E8F0")
+
+
 def build_financial_statement_excel(
     ledger_df: pd.DataFrame,
     trial_balance: pd.DataFrame,
@@ -997,8 +1123,12 @@ def build_financial_statement_excel(
         checklist_items = MONTHLY_CHECKLIST_ITEMS if period_label == "月次決算" else YEARLY_CHECKLIST_ITEMS
         build_checklist(checklist_items, period_label).to_excel(writer, index=False, sheet_name="チェックリスト")
 
-        for sheet in writer.book.worksheets:
-            sheet.freeze_panes = "A2"
+        workbook = writer.book
+        add_cover_sheet(workbook, period_label)
+        add_financial_summary_sheet(workbook, period_label)
+        apply_financial_report_format(workbook)
+
+        for sheet in workbook.worksheets:
             for column_cells in sheet.columns:
                 max_length = max(len(str(cell.value or "")) for cell in column_cells)
                 sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 38)
