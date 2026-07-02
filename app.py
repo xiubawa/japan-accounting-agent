@@ -1611,7 +1611,7 @@ def build_financial_statement_excel(
         workbook = writer.book
         add_accounting_program_sheets(workbook, ledger_df, period_label, index=0, opening_balances=opening_balances)
         if period_label == "年次決算":
-            add_worksheet_sheet(workbook, trial_balance, period_label, index=5)
+            add_worksheet_sheet(workbook, trial_balance, period_label, index=3)
         apply_financial_report_format(workbook)
 
         for sheet in workbook.worksheets:
