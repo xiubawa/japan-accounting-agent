@@ -1590,6 +1590,37 @@ def add_accounting_program_sheets(
             opening.get("メモ", ""),
         ])
 
+    debit_totals = {}
+    credit_totals = {}
+    if ledger_df is not None and not ledger_df.empty:
+        debit_totals = {
+            str(account): safe_excel_int(amount)
+            for account, amount in ledger_df.groupby("借方勘定科目", dropna=False)["借方金額"].sum().items()
+        }
+        credit_totals = {
+            str(account): safe_excel_int(amount)
+            for account, amount in ledger_df.groupby("貸方勘定科目", dropna=False)["貸方金額"].sum().items()
+        }
+
+    account_values = {}
+    for row in account_rows:
+        account = row["科目"]
+        category = row["分類"]
+        opening_amount = safe_excel_int(opening_map.get(account, {}).get("開始残高", 0))
+        debit_amount = safe_excel_int(debit_totals.get(account, 0))
+        credit_amount = safe_excel_int(credit_totals.get(account, 0))
+        if category in ["収益", "負債", "純資産"]:
+            current_amount = opening_amount + credit_amount - debit_amount
+        else:
+            current_amount = opening_amount + debit_amount - credit_amount
+        account_values[account] = {
+            "分類": category,
+            "開始残高": opening_amount,
+            "借方合計": debit_amount,
+            "貸方合計": credit_amount,
+            "現在残高": current_amount,
+        }
+
     account_list_range = f"'科目マスタ'!$B$2:$B${len(account_rows) + 1}"
     validation = DataValidation(type="list", formula1=account_list_range, allow_blank=True)
     ledger_sheet.add_data_validation(validation)
@@ -1599,19 +1630,23 @@ def add_accounting_program_sheets(
     trial_headers = ["コード", "科目", "分類", "開始残高", "借方合計", "貸方合計", "現在残高"]
     trial_sheet.append(trial_headers)
     for row_idx, account in enumerate(account_rows, start=2):
+        values = account_values[account["科目"]]
         trial_sheet[f"A{row_idx}"] = account["コード"]
         trial_sheet[f"B{row_idx}"] = account["科目"]
-        trial_sheet[f"C{row_idx}"] = f'=IFERROR(VLOOKUP(B{row_idx},科目マスタ!$B:$D,2,FALSE),"未分類")'
-        trial_sheet[f"D{row_idx}"] = f'=IFERROR(INDEX(科目マスタ!$E:$E,MATCH(B{row_idx},科目マスタ!$B:$B,0)),0)'
-        trial_sheet[f"E{row_idx}"] = f'=SUMIF(仕訳帳!$C:$C,B{row_idx},仕訳帳!$D:$D)'
-        trial_sheet[f"F{row_idx}"] = f'=SUMIF(仕訳帳!$E:$E,B{row_idx},仕訳帳!$F:$F)'
-        trial_sheet[f"G{row_idx}"] = f'=D{row_idx}+IF(OR(C{row_idx}="収益",C{row_idx}="負債",C{row_idx}="純資産"),F{row_idx}-E{row_idx},E{row_idx}-F{row_idx})'
+        trial_sheet[f"C{row_idx}"] = values["分類"]
+        trial_sheet[f"D{row_idx}"] = values["開始残高"]
+        trial_sheet[f"E{row_idx}"] = values["借方合計"]
+        trial_sheet[f"F{row_idx}"] = values["貸方合計"]
+        trial_sheet[f"G{row_idx}"] = values["現在残高"]
     trial_total_row = len(account_rows) + 2
     trial_sheet[f"B{trial_total_row}"] = "合計"
-    trial_sheet[f"D{trial_total_row}"] = f"=SUM(D2:D{trial_total_row - 1})"
-    trial_sheet[f"E{trial_total_row}"] = f"=SUM(E2:E{trial_total_row - 1})"
-    trial_sheet[f"F{trial_total_row}"] = f"=SUM(F2:F{trial_total_row - 1})"
-    trial_sheet[f"G{trial_total_row}"] = f"=SUMIF(C2:C{trial_total_row - 1},\"資産\",G2:G{trial_total_row - 1})+SUMIF(C2:C{trial_total_row - 1},\"費用\",G2:G{trial_total_row - 1})-SUMIF(C2:C{trial_total_row - 1},\"負債\",G2:G{trial_total_row - 1})-SUMIF(C2:C{trial_total_row - 1},\"純資産\",G2:G{trial_total_row - 1})-SUMIF(C2:C{trial_total_row - 1},\"収益\",G2:G{trial_total_row - 1})"
+    trial_sheet[f"D{trial_total_row}"] = sum(values["開始残高"] for values in account_values.values())
+    trial_sheet[f"E{trial_total_row}"] = sum(values["借方合計"] for values in account_values.values())
+    trial_sheet[f"F{trial_total_row}"] = sum(values["貸方合計"] for values in account_values.values())
+    trial_sheet[f"G{trial_total_row}"] = (
+        sum(values["現在残高"] for values in account_values.values() if values["分類"] in ["資産", "費用"])
+        - sum(values["現在残高"] for values in account_values.values() if values["分類"] in ["負債", "純資産", "収益"])
+    )
 
     pl_sheet["A1"] = "PL 損益計算書"
     pl_sheet["B1"] = period_label
@@ -1622,23 +1657,24 @@ def add_accounting_program_sheets(
     expense_accounts = [row["科目"] for row in account_rows if row["分類"] == "費用"]
     for account in revenue_accounts:
         pl_sheet[f"A{current_row}"] = account
-        pl_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$G:$G,MATCH(A{current_row},試算表!$B:$B,0)),0)'
+        pl_sheet[f"B{current_row}"] = account_values.get(account, {}).get("現在残高", 0)
         current_row += 1
     revenue_total_row = current_row
     pl_sheet[f"A{revenue_total_row}"] = "収益合計"
-    pl_sheet[f"B{revenue_total_row}"] = f"=SUM(B4:B{revenue_total_row - 1})"
+    pl_sheet[f"B{revenue_total_row}"] = sum(account_values.get(account, {}).get("現在残高", 0) for account in revenue_accounts)
     current_row += 2
     expense_start_row = current_row
     for account in expense_accounts:
         pl_sheet[f"A{current_row}"] = account
-        pl_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$G:$G,MATCH(A{current_row},試算表!$B:$B,0)),0)'
+        pl_sheet[f"B{current_row}"] = account_values.get(account, {}).get("現在残高", 0)
         current_row += 1
     expense_total_row = current_row
     pl_sheet[f"A{expense_total_row}"] = "費用合計"
-    pl_sheet[f"B{expense_total_row}"] = f"=SUM(B{expense_start_row}:B{expense_total_row - 1})"
+    pl_sheet[f"B{expense_total_row}"] = sum(account_values.get(account, {}).get("現在残高", 0) for account in expense_accounts)
     net_income_row = current_row + 1
     pl_sheet[f"A{net_income_row}"] = "当期純利益"
-    pl_sheet[f"B{net_income_row}"] = f"=B{revenue_total_row}-B{expense_total_row}"
+    net_income = safe_excel_int(pl_sheet[f"B{revenue_total_row}"].value) - safe_excel_int(pl_sheet[f"B{expense_total_row}"].value)
+    pl_sheet[f"B{net_income_row}"] = net_income
 
     bs_sheet["A1"] = "BS 貸借対照表"
     bs_sheet["B1"] = period_label
@@ -1651,21 +1687,29 @@ def add_accounting_program_sheets(
         bs_sheet[f"A{current_row}"].font = Font(bold=True, color="1F4E78")
         current_row += 1
         category_start_row = current_row
-        for account in [row["科目"] for row in account_rows if row["分類"] == category]:
+        category_accounts = [row["科目"] for row in account_rows if row["分類"] == category]
+        for account in category_accounts:
             bs_sheet[f"A{current_row}"] = account
-            bs_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$G:$G,MATCH(A{current_row},試算表!$B:$B,0)),0)'
+            bs_sheet[f"B{current_row}"] = account_values.get(account, {}).get("現在残高", 0)
             current_row += 1
         if category == "純資産":
             bs_sheet[f"A{current_row}"] = "当期純利益"
-            bs_sheet[f"B{current_row}"] = f"=PL!B{net_income_row}"
+            bs_sheet[f"B{current_row}"] = net_income
             current_row += 1
         total_row = current_row
         bs_sheet[f"A{total_row}"] = f"{category}合計"
-        bs_sheet[f"B{total_row}"] = f"=SUM(B{category_start_row}:B{total_row - 1})"
+        bs_sheet[f"B{total_row}"] = sum(
+            safe_excel_int(bs_sheet[f"B{row_number}"].value)
+            for row_number in range(category_start_row, total_row)
+        )
         bs_total_rows[category] = total_row
         current_row += 2
     bs_sheet[f"A{current_row}"] = "B/S差額チェック"
-    bs_sheet[f"B{current_row}"] = f"=B{bs_total_rows['資産']}-B{bs_total_rows['負債']}-B{bs_total_rows['純資産']}"
+    bs_sheet[f"B{current_row}"] = (
+        safe_excel_int(bs_sheet[f"B{bs_total_rows['資産']}"].value)
+        - safe_excel_int(bs_sheet[f"B{bs_total_rows['負債']}"].value)
+        - safe_excel_int(bs_sheet[f"B{bs_total_rows['純資産']}"].value)
+    )
 
     style_program_sheet(ledger_sheet, freeze="A2")
     style_program_sheet(master_sheet, freeze="A2")
