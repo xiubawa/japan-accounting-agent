@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 from openai import OpenAI
 from PIL import Image
@@ -75,6 +76,8 @@ ACCOUNT_CODE_TABLE = [
     ("790", "減価償却費"),
     ("800", "雑費"),
 ]
+
+CORE_ACCOUNTING_SHEETS = ["仕訳帳", "科目マスタ", "試算表", "PL", "BS"]
 
 PLAN_TEXT_EXAMPLES = {
     "free": "例：2026年6月10日、法人カードでAmazon Japanへ11,000円支払い。キーボードとマウスを購入。消費税10%、適格請求書取得済み。",
@@ -813,9 +816,10 @@ def build_excel(df: pd.DataFrame) -> bytes:
         ])
         summary.to_excel(writer, index=False, sheet_name="集計")
         workbook = writer.book
-        add_cover_sheet(workbook, "基本記帳・決算補助")
-        add_financial_summary_sheet(workbook, "基本記帳・決算補助")
-        add_worksheet_sheet(workbook, build_trial_balance(df), "対象期間")
+        add_accounting_program_sheets(workbook, df, "基本記帳・決算補助", index=0)
+        add_cover_sheet(workbook, "基本記帳・決算補助", index=5)
+        add_financial_summary_sheet(workbook, "基本記帳・決算補助", index=6)
+        add_worksheet_sheet(workbook, build_trial_balance(df), "対象期間", index=7)
         apply_financial_report_format(workbook)
         for sheet in workbook.worksheets:
             for column_index, column_cells in enumerate(sheet.columns, start=1):
@@ -1032,6 +1036,206 @@ def build_balance_sheet(trial_balance: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([statement, pd.DataFrame(totals)], ignore_index=True)
 
 
+def get_account_master_rows(df: pd.DataFrame | None = None) -> list[dict]:
+    rows = []
+    seen_accounts = set()
+
+    for code, account in ACCOUNT_CODE_TABLE:
+        category = classify_account(account)
+        rows.append({
+            "コード": code,
+            "科目": account,
+            "分類": category,
+            "帳票": "PL" if category in ["収益", "費用"] else "BS",
+        })
+        seen_accounts.add(account)
+
+    if df is not None and not df.empty:
+        account_columns = ["借方勘定科目", "貸方勘定科目"]
+        accounts = set()
+        for column in account_columns:
+            if column in df.columns:
+                accounts.update(str(value).strip() for value in df[column].dropna().tolist())
+        for account in sorted(account for account in accounts if account and account not in seen_accounts):
+            category = classify_account(account)
+            rows.append({
+                "コード": "",
+                "科目": account,
+                "分類": category,
+                "帳票": "PL" if category in ["収益", "費用"] else ("要確認" if category == "未分類" else "BS"),
+            })
+
+    return rows
+
+
+def create_or_replace_sheet(workbook, title: str, index: int):
+    if title in workbook.sheetnames:
+        workbook.remove(workbook[title])
+    return workbook.create_sheet(title, index)
+
+
+def safe_excel_int(value) -> int:
+    number = pd.to_numeric(value, errors="coerce")
+    return 0 if pd.isna(number) else int(number)
+
+
+def style_program_sheet(sheet, header_row: int = 1, freeze: str | None = "A2") -> None:
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(color="FFFFFF", bold=True)
+    thin = Side(style="thin", color="A6A6A6")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    sheet.sheet_view.showGridLines = False
+    if freeze:
+        sheet.freeze_panes = freeze
+
+    for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row, max_col=sheet.max_column):
+        for cell in row:
+            cell.border = border
+            cell.alignment = Alignment(vertical="center")
+            if isinstance(cell.value, (int, float)) or (isinstance(cell.value, str) and cell.value.startswith("=")):
+                cell.number_format = '#,##0;[Red]-#,##0;-'
+
+    for cell in sheet[header_row]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for column_idx in range(1, sheet.max_column + 1):
+        column_letter = get_column_letter(column_idx)
+        max_length = max(len(str(cell.value or "")) for cell in sheet[column_letter])
+        sheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 26)
+
+
+def add_accounting_program_sheets(workbook, ledger_df: pd.DataFrame, period_label: str, index: int = 0) -> None:
+    for sheet_name in CORE_ACCOUNTING_SHEETS:
+        if sheet_name in workbook.sheetnames:
+            workbook.remove(workbook[sheet_name])
+
+    ledger_sheet = workbook.create_sheet("仕訳帳", index)
+    master_sheet = workbook.create_sheet("科目マスタ", index + 1)
+    trial_sheet = workbook.create_sheet("試算表", index + 2)
+    pl_sheet = workbook.create_sheet("PL", index + 3)
+    bs_sheet = workbook.create_sheet("BS", index + 4)
+
+    ledger_headers = ["日付", "摘要", "借方科目", "借方金額", "貸方科目", "貸方金額"]
+    ledger_sheet.append(ledger_headers)
+    for _, row in ledger_df.iterrows():
+        ledger_sheet.append([
+            row.get("取引日", ""),
+            row.get("摘要", ""),
+            row.get("借方勘定科目", ""),
+            safe_excel_int(row.get("借方金額", 0)),
+            row.get("貸方勘定科目", ""),
+            safe_excel_int(row.get("貸方金額", 0)),
+        ])
+    for _ in range(max(100 - len(ledger_df), 20)):
+        ledger_sheet.append(["", "", "", "", "", ""])
+
+    master_headers = ["コード", "科目", "分類", "帳票"]
+    master_sheet.append(master_headers)
+    account_rows = get_account_master_rows(ledger_df)
+    for row in account_rows:
+        master_sheet.append([row["コード"], row["科目"], row["分類"], row["帳票"]])
+
+    account_list_range = f"'科目マスタ'!$B$2:$B${len(account_rows) + 1}"
+    validation = DataValidation(type="list", formula1=account_list_range, allow_blank=True)
+    ledger_sheet.add_data_validation(validation)
+    validation.add(f"C2:C{ledger_sheet.max_row}")
+    validation.add(f"E2:E{ledger_sheet.max_row}")
+
+    trial_headers = ["コード", "科目", "分類", "借方合計", "貸方合計", "残高"]
+    trial_sheet.append(trial_headers)
+    for row_idx, account in enumerate(account_rows, start=2):
+        trial_sheet[f"A{row_idx}"] = account["コード"]
+        trial_sheet[f"B{row_idx}"] = account["科目"]
+        trial_sheet[f"C{row_idx}"] = f'=IFERROR(VLOOKUP(B{row_idx},科目マスタ!$B:$D,2,FALSE),"未分類")'
+        trial_sheet[f"D{row_idx}"] = f'=SUMIF(仕訳帳!$C:$C,B{row_idx},仕訳帳!$D:$D)'
+        trial_sheet[f"E{row_idx}"] = f'=SUMIF(仕訳帳!$E:$E,B{row_idx},仕訳帳!$F:$F)'
+        trial_sheet[f"F{row_idx}"] = f'=IF(OR(C{row_idx}="収益",C{row_idx}="負債",C{row_idx}="純資産"),E{row_idx}-D{row_idx},D{row_idx}-E{row_idx})'
+    trial_total_row = len(account_rows) + 2
+    trial_sheet[f"B{trial_total_row}"] = "合計"
+    trial_sheet[f"D{trial_total_row}"] = f"=SUM(D2:D{trial_total_row - 1})"
+    trial_sheet[f"E{trial_total_row}"] = f"=SUM(E2:E{trial_total_row - 1})"
+    trial_sheet[f"F{trial_total_row}"] = f"=D{trial_total_row}-E{trial_total_row}"
+
+    pl_sheet["A1"] = "PL 損益計算書"
+    pl_sheet["B1"] = period_label
+    pl_sheet["A3"] = "項目"
+    pl_sheet["B3"] = "金額"
+    current_row = 4
+    revenue_accounts = [row["科目"] for row in account_rows if row["分類"] == "収益"]
+    expense_accounts = [row["科目"] for row in account_rows if row["分類"] == "費用"]
+    for account in revenue_accounts:
+        pl_sheet[f"A{current_row}"] = account
+        pl_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$F:$F,MATCH(A{current_row},試算表!$B:$B,0)),0)'
+        current_row += 1
+    revenue_total_row = current_row
+    pl_sheet[f"A{revenue_total_row}"] = "収益合計"
+    pl_sheet[f"B{revenue_total_row}"] = f"=SUM(B4:B{revenue_total_row - 1})"
+    current_row += 2
+    expense_start_row = current_row
+    for account in expense_accounts:
+        pl_sheet[f"A{current_row}"] = account
+        pl_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$F:$F,MATCH(A{current_row},試算表!$B:$B,0)),0)'
+        current_row += 1
+    expense_total_row = current_row
+    pl_sheet[f"A{expense_total_row}"] = "費用合計"
+    pl_sheet[f"B{expense_total_row}"] = f"=SUM(B{expense_start_row}:B{expense_total_row - 1})"
+    net_income_row = current_row + 1
+    pl_sheet[f"A{net_income_row}"] = "当期純利益"
+    pl_sheet[f"B{net_income_row}"] = f"=B{revenue_total_row}-B{expense_total_row}"
+
+    bs_sheet["A1"] = "BS 貸借対照表"
+    bs_sheet["B1"] = period_label
+    bs_sheet["A3"] = "項目"
+    bs_sheet["B3"] = "金額"
+    current_row = 4
+    bs_total_rows = {}
+    for category in ["資産", "負債", "純資産"]:
+        bs_sheet[f"A{current_row}"] = category
+        bs_sheet[f"A{current_row}"].font = Font(bold=True, color="1F4E78")
+        current_row += 1
+        category_start_row = current_row
+        for account in [row["科目"] for row in account_rows if row["分類"] == category]:
+            bs_sheet[f"A{current_row}"] = account
+            bs_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$F:$F,MATCH(A{current_row},試算表!$B:$B,0)),0)'
+            current_row += 1
+        if category == "純資産":
+            bs_sheet[f"A{current_row}"] = "当期純利益"
+            bs_sheet[f"B{current_row}"] = f"=PL!B{net_income_row}"
+            current_row += 1
+        total_row = current_row
+        bs_sheet[f"A{total_row}"] = f"{category}合計"
+        bs_sheet[f"B{total_row}"] = f"=SUM(B{category_start_row}:B{total_row - 1})"
+        bs_total_rows[category] = total_row
+        current_row += 2
+    bs_sheet[f"A{current_row}"] = "B/S差額チェック"
+    bs_sheet[f"B{current_row}"] = f"=B{bs_total_rows['資産']}-B{bs_total_rows['負債']}-B{bs_total_rows['純資産']}"
+
+    style_program_sheet(ledger_sheet, freeze="A2")
+    style_program_sheet(master_sheet, freeze="A2")
+    style_program_sheet(trial_sheet, freeze="A2")
+    style_program_sheet(pl_sheet, header_row=3, freeze="A4")
+    style_program_sheet(bs_sheet, header_row=3, freeze="A4")
+
+    for sheet in [pl_sheet, bs_sheet]:
+        sheet["A1"].font = Font(size=16, bold=True, color="0F172A")
+        sheet["B1"].font = Font(bold=True, color="2563EB")
+    for sheet, rows in [(trial_sheet, [trial_total_row]), (pl_sheet, [revenue_total_row, expense_total_row, net_income_row])]:
+        for row_idx in rows:
+            for cell in sheet[row_idx]:
+                cell.font = Font(bold=True, color="0F172A")
+                cell.fill = PatternFill("solid", fgColor="E2E8F0")
+    for row_idx in bs_total_rows.values():
+        for cell in bs_sheet[row_idx]:
+            cell.font = Font(bold=True, color="0F172A")
+            cell.fill = PatternFill("solid", fgColor="E2E8F0")
+    for cell in bs_sheet[current_row]:
+        cell.font = Font(bold=True, color="9F1239")
+        cell.fill = PatternFill("solid", fgColor="FFE4E6")
+
+
 def style_excel_sheet(sheet, freeze: str = "A2") -> None:
     header_fill = PatternFill("solid", fgColor="0F172A")
     header_font = Font(color="FFFFFF", bold=True)
@@ -1071,15 +1275,15 @@ def style_excel_sheet(sheet, freeze: str = "A2") -> None:
         sheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 42)
 
 
-def add_cover_sheet(workbook, period_label: str) -> None:
-    sheet = workbook.create_sheet("表紙", 0)
+def add_cover_sheet(workbook, period_label: str, index: int = 0) -> None:
+    sheet = create_or_replace_sheet(workbook, "表紙", index)
     sheet.sheet_view.showGridLines = False
     sheet["B2"] = "財務報告書"
     sheet["B3"] = period_label
     sheet["B5"] = "作成日時"
     sheet["C5"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sheet["B7"] = "含まれる帳票"
-    reports = ["財務サマリー", "試算表", "損益計算書", "貸借対照表", "チェックリスト", "取込仕訳"]
+    reports = ["仕訳帳", "科目マスタ", "試算表", "PL", "BS", "精算表", "財務サマリー"]
     for idx, report in enumerate(reports, start=8):
         sheet[f"B{idx}"] = report
     sheet["B16"] = "注意"
@@ -1093,19 +1297,19 @@ def add_cover_sheet(workbook, period_label: str) -> None:
     sheet.column_dimensions["C"].width = 72
 
 
-def add_financial_summary_sheet(workbook, period_label: str) -> None:
-    sheet = workbook.create_sheet("財務サマリー", 1)
+def add_financial_summary_sheet(workbook, period_label: str, index: int = 1) -> None:
+    sheet = create_or_replace_sheet(workbook, "財務サマリー", index)
     sheet.sheet_view.showGridLines = False
     sheet["B2"] = "財務サマリー"
     sheet["C2"] = period_label
 
     rows = [
-        ("売上高", '=SUMIF(損益計算書!A:A,"収益",損益計算書!C:C)'),
-        ("費用合計", '=SUMIF(損益計算書!B:B,"費用合計",損益計算書!C:C)'),
-        ("当期利益", '=SUMIF(損益計算書!B:B,"当期利益",損益計算書!C:C)'),
-        ("資産合計", '=SUMIF(貸借対照表!B:B,"資産合計",貸借対照表!C:C)'),
-        ("負債合計", '=SUMIF(貸借対照表!B:B,"負債合計",貸借対照表!C:C)'),
-        ("純資産合計", '=SUMIF(貸借対照表!B:B,"純資産合計",貸借対照表!C:C)'),
+        ("売上高", '=SUMIF(PL!A:A,"収益合計",PL!B:B)'),
+        ("費用合計", '=SUMIF(PL!A:A,"費用合計",PL!B:B)'),
+        ("当期利益", '=SUMIF(PL!A:A,"当期純利益",PL!B:B)'),
+        ("資産合計", '=SUMIF(BS!A:A,"資産合計",BS!B:B)'),
+        ("負債合計", '=SUMIF(BS!A:A,"負債合計",BS!B:B)'),
+        ("純資産合計", '=SUMIF(BS!A:A,"純資産合計",BS!B:B)'),
         ("B/S差額チェック", '=C6-C7-C8'),
     ]
     sheet["B4"] = "指標"
@@ -1136,8 +1340,8 @@ def add_financial_summary_sheet(workbook, period_label: str) -> None:
     sheet.column_dimensions["E"].width = 48
 
 
-def add_worksheet_sheet(workbook, trial_balance: pd.DataFrame, period_label: str) -> None:
-    sheet = workbook.create_sheet("精算表", 2)
+def add_worksheet_sheet(workbook, trial_balance: pd.DataFrame, period_label: str, index: int = 2) -> None:
+    sheet = create_or_replace_sheet(workbook, "精算表", index)
     sheet.sheet_view.showGridLines = False
     sheet.freeze_panes = "A5"
 
@@ -1234,7 +1438,7 @@ def add_worksheet_sheet(workbook, trial_balance: pd.DataFrame, period_label: str
 
 def apply_financial_report_format(workbook) -> None:
     for sheet in workbook.worksheets:
-        if sheet.title not in ["表紙", "財務サマリー", "精算表"]:
+        if sheet.title not in ["表紙", "財務サマリー", "精算表", *CORE_ACCOUNTING_SHEETS]:
             style_excel_sheet(sheet)
 
     for sheet_name in ["損益計算書", "貸借対照表", "試算表"]:
@@ -1267,9 +1471,10 @@ def build_financial_statement_excel(
         build_checklist(checklist_items, period_label).to_excel(writer, index=False, sheet_name="チェックリスト")
 
         workbook = writer.book
-        add_cover_sheet(workbook, period_label)
-        add_financial_summary_sheet(workbook, period_label)
-        add_worksheet_sheet(workbook, trial_balance, period_label)
+        add_accounting_program_sheets(workbook, ledger_df, period_label, index=0)
+        add_cover_sheet(workbook, period_label, index=5)
+        add_financial_summary_sheet(workbook, period_label, index=6)
+        add_worksheet_sheet(workbook, trial_balance, period_label, index=7)
         apply_financial_report_format(workbook)
 
         for sheet in workbook.worksheets:
