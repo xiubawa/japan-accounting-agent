@@ -790,36 +790,9 @@ def build_checklist(items: list[tuple[str, str]], period_label: str) -> pd.DataF
 
 def build_excel(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
-    monthly_summary, monthly_accounts, monthly_taxes = build_monthly_closing_report(df)
-    yearly_summary, yearly_accounts, yearly_pending = build_yearly_closing_report(df)
-    monthly_checklist = build_checklist(MONTHLY_CHECKLIST_ITEMS, "月次決算")
-    yearly_checklist = build_checklist(YEARLY_CHECKLIST_ITEMS, "年次決算")
-
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="仕訳一覧")
-        pending = df[df["確認事項"].astype(str).str.len() > 0].copy()
-        pending.to_excel(writer, index=False, sheet_name="確認待ち")
-        monthly_summary.to_excel(writer, index=False, sheet_name="月次サマリー")
-        monthly_accounts.to_excel(writer, index=False, sheet_name="月次科目別")
-        monthly_taxes.to_excel(writer, index=False, sheet_name="月次税区分別")
-        yearly_summary.to_excel(writer, index=False, sheet_name="年次サマリー")
-        yearly_accounts.to_excel(writer, index=False, sheet_name="年次科目別")
-        yearly_pending.to_excel(writer, index=False, sheet_name="年次確認事項")
-        monthly_checklist.to_excel(writer, index=False, sheet_name="月次チェックリスト")
-        yearly_checklist.to_excel(writer, index=False, sheet_name="年次チェックリスト")
-        summary = pd.DataFrame([
-            {"項目": "処理日時", "内容": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-            {"項目": "取引件数", "内容": len(df)},
-            {"項目": "税込合計", "内容": int(pd.to_numeric(df["税込金額"], errors="coerce").fillna(0).sum())},
-            {"項目": "出力内容", "内容": "仕訳一覧、月次決算、年次決算、確認チェックリスト"},
-            {"項目": "注意", "内容": "AIによる参考判定です。決算・申告の最終判断は税理士へ確認してください。"},
-        ])
-        summary.to_excel(writer, index=False, sheet_name="集計")
         workbook = writer.book
         add_accounting_program_sheets(workbook, df, "基本記帳・決算補助", index=0)
-        add_cover_sheet(workbook, "基本記帳・決算補助", index=5)
-        add_financial_summary_sheet(workbook, "基本記帳・決算補助", index=6)
-        add_worksheet_sheet(workbook, build_trial_balance(df), "対象期間", index=7)
         apply_financial_report_format(workbook)
         for sheet in workbook.worksheets:
             for column_index, column_cells in enumerate(sheet.columns, start=1):
@@ -1463,18 +1436,10 @@ def build_financial_statement_excel(
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        ledger_df.to_excel(writer, index=False, sheet_name="取込仕訳")
-        trial_balance.to_excel(writer, index=False, sheet_name="試算表")
-        profit_and_loss.to_excel(writer, index=False, sheet_name="損益計算書")
-        balance_sheet.to_excel(writer, index=False, sheet_name="貸借対照表")
-        checklist_items = MONTHLY_CHECKLIST_ITEMS if period_label == "月次決算" else YEARLY_CHECKLIST_ITEMS
-        build_checklist(checklist_items, period_label).to_excel(writer, index=False, sheet_name="チェックリスト")
-
         workbook = writer.book
         add_accounting_program_sheets(workbook, ledger_df, period_label, index=0)
-        add_cover_sheet(workbook, period_label, index=5)
-        add_financial_summary_sheet(workbook, period_label, index=6)
-        add_worksheet_sheet(workbook, trial_balance, period_label, index=7)
+        if period_label == "年次決算":
+            add_worksheet_sheet(workbook, trial_balance, period_label, index=5)
         apply_financial_report_format(workbook)
 
         for sheet in workbook.worksheets:
