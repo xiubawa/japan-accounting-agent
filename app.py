@@ -7,6 +7,9 @@ import json
 import os
 import secrets as token_secrets
 import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -368,6 +371,98 @@ def get_config_value(name: str, default: str = "") -> str:
     except Exception:
         pass
     return os.getenv(name, default)
+
+
+def get_supabase_config() -> tuple[str, str, str]:
+    url = get_config_value("SUPABASE_URL", "").rstrip("/")
+    key = get_config_value("SUPABASE_SERVICE_ROLE_KEY", "")
+    table = get_config_value("SUPABASE_STORAGE_TABLE", "customer_storage")
+    return url, key, table
+
+
+def is_remote_storage_enabled() -> bool:
+    url, key, _ = get_supabase_config()
+    return bool(url and key)
+
+
+def get_storage_key(customer: dict, kind: str) -> str:
+    username = str(customer.get("username", "anonymous"))
+    digest = hashlib.sha256(username.encode("utf-8")).hexdigest()[:24]
+    return f"{digest}_{kind}"
+
+
+def supabase_request(method: str, path: str, payload=None):
+    url, key, _ = get_supabase_config()
+    if not url or not key:
+        raise RuntimeError("Supabase is not configured.")
+
+    body = None
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if payload is not None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+
+    request = urllib.request.Request(f"{url}{path}", data=body, headers=headers, method=method)
+    with urllib.request.urlopen(request, timeout=12) as response:
+        content = response.read().decode("utf-8")
+        if not content:
+            return None
+        return json.loads(content)
+
+
+def load_remote_payload(customer: dict, kind: str):
+    if not is_remote_storage_enabled():
+        return None
+
+    _, _, table = get_supabase_config()
+    storage_key = get_storage_key(customer, kind)
+    encoded_key = urllib.parse.quote(storage_key, safe="")
+    try:
+        result = supabase_request("GET", f"/rest/v1/{table}?storage_key=eq.{encoded_key}&select=payload")
+    except (urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
+        return None
+    if isinstance(result, list) and result:
+        return result[0].get("payload")
+    return None
+
+
+def save_remote_payload(customer: dict, kind: str, payload) -> bool:
+    if not is_remote_storage_enabled():
+        return False
+
+    _, _, table = get_supabase_config()
+    storage_key = get_storage_key(customer, kind)
+    try:
+        supabase_request(
+            "POST",
+            f"/rest/v1/{table}?on_conflict=storage_key",
+            {
+                "storage_key": storage_key,
+                "payload": payload,
+                "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            },
+        )
+        return True
+    except (urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
+        return False
+
+
+def delete_remote_payload(customer: dict, kind: str) -> bool:
+    if not is_remote_storage_enabled():
+        return False
+
+    _, _, table = get_supabase_config()
+    storage_key = get_storage_key(customer, kind)
+    encoded_key = urllib.parse.quote(storage_key, safe="")
+    try:
+        supabase_request("DELETE", f"/rest/v1/{table}?storage_key=eq.{encoded_key}")
+        return True
+    except (urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
+        return False
 
 
 def escape_html(value: str) -> str:
@@ -1080,6 +1175,14 @@ def get_customer_opening_balance_path(customer: dict) -> Path:
 
 
 def load_customer_ledger(customer: dict) -> pd.DataFrame:
+    remote_data = load_remote_payload(customer, "ledger")
+    if isinstance(remote_data, list):
+        df = pd.DataFrame(remote_data)
+        for column in EXCEL_COLUMNS:
+            if column not in df.columns:
+                df[column] = ""
+        return df[EXCEL_COLUMNS]
+
     path = get_customer_ledger_path(customer)
     if not path.exists():
         return pd.DataFrame(columns=EXCEL_COLUMNS)
@@ -1100,8 +1203,11 @@ def load_customer_ledger(customer: dict) -> pd.DataFrame:
 
 
 def save_customer_ledger(customer: dict, df: pd.DataFrame) -> None:
-    LEDGER_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     clean_df = normalize_uploaded_ledger(df)
+    if save_remote_payload(customer, "ledger", clean_df.to_dict(orient="records")):
+        return
+
+    LEDGER_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     path = get_customer_ledger_path(customer)
     path.write_text(clean_df.to_json(orient="records", force_ascii=False, indent=2), encoding="utf-8")
 
@@ -1117,6 +1223,7 @@ def append_customer_ledger(customer: dict, df: pd.DataFrame) -> int:
 
 
 def clear_customer_ledger(customer: dict) -> None:
+    delete_remote_payload(customer, "ledger")
     path = get_customer_ledger_path(customer)
     if path.exists():
         path.unlink()
@@ -1187,6 +1294,10 @@ def normalize_opening_balance_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_customer_opening_balances(customer: dict) -> pd.DataFrame:
+    remote_data = load_remote_payload(customer, "opening_balances")
+    if isinstance(remote_data, list):
+        return build_opening_balance_template(normalize_opening_balance_df(pd.DataFrame(remote_data)))
+
     path = get_customer_opening_balance_path(customer)
     if not path.exists():
         return build_opening_balance_template()
@@ -1202,8 +1313,11 @@ def load_customer_opening_balances(customer: dict) -> pd.DataFrame:
 
 
 def save_customer_opening_balances(customer: dict, df: pd.DataFrame) -> None:
-    LEDGER_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     clean_df = normalize_opening_balance_df(df)
+    if save_remote_payload(customer, "opening_balances", clean_df.to_dict(orient="records")):
+        return
+
+    LEDGER_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     path = get_customer_opening_balance_path(customer)
     path.write_text(clean_df.to_json(orient="records", force_ascii=False, indent=2), encoding="utf-8")
 
@@ -2052,6 +2166,7 @@ def render_closing_workspace(period_label: str, transaction_limit: int, customer
 
     source = st.radio("データ元", ["帳簿ファイルをアップロード", "保存済み帳簿を使う"], horizontal=True, key=f"{period_label}_source")
     ledger_df = pd.DataFrame(columns=EXCEL_COLUMNS)
+    run_closing = False
 
     if source == "帳簿ファイルをアップロード":
         uploaded_files = st.file_uploader(
@@ -2062,6 +2177,10 @@ def render_closing_workspace(period_label: str, transaction_limit: int, customer
         )
         if not uploaded_files:
             st.info("顧客の仕訳帳ファイルをアップロードしてください。年次決算では月別ファイルを複数選択できます。")
+            return
+        st.caption(f"{len(uploaded_files)} ファイルを選択中です。内容を確認してから作成ボタンを押してください。")
+        run_closing = st.button("このファイルで決算表を作成", type="primary", width="stretch", key=f"{period_label}_run_uploaded")
+        if not run_closing:
             return
         try:
             ledger_dfs = []
@@ -2079,6 +2198,10 @@ def render_closing_workspace(period_label: str, transaction_limit: int, customer
         ledger_df = load_customer_ledger(customer)
         if ledger_df.empty:
             st.info("保存済み帳簿がありません。基本記帳で仕訳を保存するか、帳簿ファイルをアップロードしてください。")
+            return
+        st.caption(f"保存済み帳簿 {len(ledger_df)} 件を利用できます。")
+        run_closing = st.button("保存済み帳簿で決算表を作成", type="primary", width="stretch", key=f"{period_label}_run_saved")
+        if not run_closing:
             return
         st.success(f"保存済み帳簿 {len(ledger_df)} 件を読み込みました。")
 
@@ -2172,6 +2295,10 @@ def main() -> None:
         st.markdown(f"<span class=\"plan-pill\">{customer['plan_label']}</span>", unsafe_allow_html=True)
         st.caption(f"上限：{transaction_limit} 取引/回")
         st.caption(f"AIモデル：{model}")
+        if is_remote_storage_enabled():
+            st.success("保存先：Supabase（永続保存）")
+        else:
+            st.warning("保存先：一時ローカル保存。再デプロイや再起動で帳簿が消える可能性があります。")
         st.divider()
         st.info(get_config_value("UPGRADE_CONTACT", "上位プランをご希望の場合は管理者までお問い合わせください。"))
 

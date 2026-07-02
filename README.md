@@ -59,7 +59,25 @@ name = "Demo Accounting Firm"
 
 顧客にはユーザーIDとパスワードを渡してください。ログインに成功した顧客だけがアプリを利用でき、顧客ごとの `plan` に応じて一度に処理できる取引件数が制限されます。画像アップロードだけでなく、テキスト入力で複数取引を書いた場合も同じ上限が適用されます。
 
-自助登録ユーザーは `customer_accounts.json` に保存されます。顧客ごとの保存済み帳簿は `customer_ledgers/` に保存されます。どちらも `.gitignore` に含まれているため、GitHub にはコミットされません。Streamlit Cloud の無料環境では、再デプロイや環境リセット時にローカルファイルが失われる可能性があります。本格運用ではデータベース連携を推奨します。
+自助登録ユーザーは `customer_accounts.json` に保存されます。Supabase を設定していない場合、顧客ごとの保存済み帳簿と開始残高は `customer_ledgers/` に保存されます。どちらも `.gitignore` に含まれているため、GitHub にはコミットされません。Streamlit Cloud の無料環境では、再デプロイや環境リセット時にローカルファイルが失われる可能性があります。本格運用では Supabase 連携を設定してください。
+
+Supabase に保存する場合は、Supabase の SQL Editor で次のテーブルを作成します。
+
+```sql
+create table if not exists public.customer_storage (
+  storage_key text primary key,
+  payload jsonb not null,
+  updated_at timestamptz default now()
+);
+```
+
+その後、Streamlit Cloud の Secrets に次を追加してください。
+
+```toml
+SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY = "your-service-role-key"
+SUPABASE_STORAGE_TABLE = "customer_storage"
+```
 
 利用できる `plan` は次の通りです。
 
