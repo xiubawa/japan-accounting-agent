@@ -78,6 +78,7 @@ ACCOUNT_CODE_TABLE = [
 ]
 
 CORE_ACCOUNTING_SHEETS = ["仕訳帳", "科目マスタ", "試算表", "PL", "BS"]
+OPENING_BALANCE_COLUMNS = ["コード", "科目", "分類", "帳票", "開始残高", "メモ"]
 
 PLAN_TEXT_EXAMPLES = {
     "free": "例：2026年6月10日、法人カードでAmazon Japanへ11,000円支払い。キーボードとマウスを購入。消費税10%、適格請求書取得済み。",
@@ -788,11 +789,11 @@ def build_checklist(items: list[tuple[str, str]], period_label: str) -> pd.DataF
     )
 
 
-def build_excel(df: pd.DataFrame) -> bytes:
+def build_excel(df: pd.DataFrame, opening_balances: pd.DataFrame | None = None) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         workbook = writer.book
-        add_accounting_program_sheets(workbook, df, "基本記帳・決算補助", index=0)
+        add_accounting_program_sheets(workbook, df, "基本記帳・決算補助", index=0, opening_balances=opening_balances)
         apply_financial_report_format(workbook)
         for sheet in workbook.worksheets:
             for column_index, column_cells in enumerate(sheet.columns, start=1):
@@ -846,6 +847,20 @@ def read_accounting_upload(uploaded_file) -> pd.DataFrame:
         raw_df = pd.read_excel(uploaded_file)
 
     return normalize_uploaded_ledger(raw_df)
+
+
+def read_raw_table_upload(uploaded_file) -> pd.DataFrame:
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        try:
+            return pd.read_csv(uploaded_file, encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            uploaded_file.seek(0)
+            return pd.read_csv(uploaded_file, encoding="cp932")
+    return pd.read_excel(uploaded_file)
 
 
 def normalize_uploaded_ledger(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -909,6 +924,12 @@ def get_customer_ledger_path(customer: dict) -> Path:
     return LEDGER_STORAGE_DIR / f"{digest}.json"
 
 
+def get_customer_opening_balance_path(customer: dict) -> Path:
+    username = str(customer.get("username", "anonymous"))
+    digest = hashlib.sha256(username.encode("utf-8")).hexdigest()[:24]
+    return LEDGER_STORAGE_DIR / f"{digest}_opening_balances.json"
+
+
 def load_customer_ledger(customer: dict) -> pd.DataFrame:
     path = get_customer_ledger_path(customer)
     if not path.exists():
@@ -952,19 +973,130 @@ def clear_customer_ledger(customer: dict) -> None:
         path.unlink()
 
 
-def build_trial_balance(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=["区分", "勘定科目", "借方合計", "貸方合計", "残高"])
+def build_opening_balance_template(existing_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    existing_map = {}
+    if existing_df is not None and not existing_df.empty:
+        for _, row in existing_df.iterrows():
+            account = str(row.get("科目", "")).strip()
+            if account:
+                existing_map[account] = {
+                    "開始残高": safe_excel_int(row.get("開始残高", 0)),
+                    "メモ": str(row.get("メモ", "") or ""),
+                }
 
-    debit = df.groupby("借方勘定科目", dropna=False)["借方金額"].sum().rename("借方合計")
-    credit = df.groupby("貸方勘定科目", dropna=False)["貸方金額"].sum().rename("貸方合計")
+    rows = []
+    seen_accounts = set()
+    for row in get_account_master_rows():
+        existing = existing_map.get(row["科目"], {})
+        rows.append({
+            "コード": row["コード"],
+            "科目": row["科目"],
+            "分類": row["分類"],
+            "帳票": row["帳票"],
+            "開始残高": existing.get("開始残高", 0),
+            "メモ": existing.get("メモ", ""),
+        })
+        seen_accounts.add(row["科目"])
+
+    if existing_df is not None and not existing_df.empty:
+        for _, row in existing_df.iterrows():
+            account = str(row.get("科目", "")).strip()
+            if not account or account in seen_accounts:
+                continue
+            category = str(row.get("分類", "") or "").strip() or classify_account(account)
+            rows.append({
+                "コード": str(row.get("コード", "") or ""),
+                "科目": account,
+                "分類": category,
+                "帳票": str(row.get("帳票", "") or "").strip() or ("PL" if category in ["収益", "費用"] else "BS"),
+                "開始残高": safe_excel_int(row.get("開始残高", 0)),
+                "メモ": str(row.get("メモ", "") or ""),
+            })
+            seen_accounts.add(account)
+    return pd.DataFrame(rows, columns=OPENING_BALANCE_COLUMNS)
+
+
+def normalize_opening_balance_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return build_opening_balance_template()
+
+    normalized = df.copy()
+    for column in OPENING_BALANCE_COLUMNS:
+        if column not in normalized.columns:
+            normalized[column] = 0 if column == "開始残高" else ""
+
+    normalized["科目"] = normalized["科目"].astype(str).str.strip()
+    normalized = normalized[normalized["科目"].astype(str).str.len() > 0].copy()
+    normalized["開始残高"] = pd.to_numeric(normalized["開始残高"], errors="coerce").fillna(0).astype(int)
+    for idx, row in normalized.iterrows():
+        account = str(row["科目"])
+        category = str(row.get("分類", "") or "").strip() or classify_account(account)
+        normalized.at[idx, "分類"] = category
+        normalized.at[idx, "帳票"] = str(row.get("帳票", "") or "").strip() or ("PL" if category in ["収益", "費用"] else "BS")
+
+    return normalized[OPENING_BALANCE_COLUMNS]
+
+
+def load_customer_opening_balances(customer: dict) -> pd.DataFrame:
+    path = get_customer_opening_balance_path(customer)
+    if not path.exists():
+        return build_opening_balance_template()
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return build_opening_balance_template()
+
+    if not isinstance(data, list):
+        return build_opening_balance_template()
+    return build_opening_balance_template(normalize_opening_balance_df(pd.DataFrame(data)))
+
+
+def save_customer_opening_balances(customer: dict, df: pd.DataFrame) -> None:
+    LEDGER_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    clean_df = normalize_opening_balance_df(df)
+    path = get_customer_opening_balance_path(customer)
+    path.write_text(clean_df.to_json(orient="records", force_ascii=False, indent=2), encoding="utf-8")
+
+
+def build_trial_balance(df: pd.DataFrame, opening_balances: pd.DataFrame | None = None) -> pd.DataFrame:
+    columns = ["区分", "勘定科目", "借方合計", "貸方合計", "残高"]
+    debit = pd.Series(dtype="int64", name="借方合計")
+    credit = pd.Series(dtype="int64", name="貸方合計")
+
+    if df is not None and not df.empty:
+        debit = df.groupby("借方勘定科目", dropna=False)["借方金額"].sum().rename("借方合計")
+        credit = df.groupby("貸方勘定科目", dropna=False)["貸方金額"].sum().rename("貸方合計")
+
     trial = pd.concat([debit, credit], axis=1).fillna(0).reset_index().rename(columns={"index": "勘定科目"})
+    opening_df = normalize_opening_balance_df(opening_balances) if opening_balances is not None else pd.DataFrame(columns=OPENING_BALANCE_COLUMNS)
+    opening_accounts = opening_df[opening_df["開始残高"] != 0][["科目", "分類", "開始残高"]].rename(columns={"科目": "勘定科目"})
+    if not opening_accounts.empty:
+        trial = pd.concat([trial, opening_accounts[["勘定科目"]]], ignore_index=True)
+
+    if trial.empty:
+        return pd.DataFrame(columns=columns)
+
+    trial = trial.drop_duplicates(subset=["勘定科目"], keep="first")
     trial = trial[trial["勘定科目"].astype(str).str.len() > 0]
+    trial[["借方合計", "貸方合計"]] = trial[["借方合計", "貸方合計"]].fillna(0)
     trial["借方合計"] = trial["借方合計"].astype(int)
     trial["貸方合計"] = trial["貸方合計"].astype(int)
     trial["残高"] = trial["借方合計"] - trial["貸方合計"]
     trial["区分"] = trial["勘定科目"].apply(classify_account)
-    return trial[["区分", "勘定科目", "借方合計", "貸方合計", "残高"]].sort_values(["区分", "勘定科目"])
+
+    if not opening_accounts.empty:
+        opening_map = dict(zip(opening_accounts["勘定科目"], opening_accounts["開始残高"]))
+        for idx, row in trial.iterrows():
+            opening_value = safe_excel_int(opening_map.get(row["勘定科目"], 0))
+            if opening_value == 0:
+                continue
+            if row["区分"] in ["収益", "負債", "純資産"]:
+                trial.at[idx, "残高"] = int(row["残高"]) - opening_value
+            else:
+                trial.at[idx, "残高"] = int(row["残高"]) + opening_value
+
+    return trial[columns].sort_values(["区分", "勘定科目"])
 
 
 def build_profit_and_loss(trial_balance: pd.DataFrame) -> pd.DataFrame:
@@ -1080,7 +1212,13 @@ def style_program_sheet(sheet, header_row: int = 1, freeze: str | None = "A2") -
         sheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 26)
 
 
-def add_accounting_program_sheets(workbook, ledger_df: pd.DataFrame, period_label: str, index: int = 0) -> None:
+def add_accounting_program_sheets(
+    workbook,
+    ledger_df: pd.DataFrame,
+    period_label: str,
+    index: int = 0,
+    opening_balances: pd.DataFrame | None = None,
+) -> None:
     for sheet_name in CORE_ACCOUNTING_SHEETS:
         if sheet_name in workbook.sheetnames:
             workbook.remove(workbook[sheet_name])
@@ -1105,11 +1243,42 @@ def add_accounting_program_sheets(workbook, ledger_df: pd.DataFrame, period_labe
     for _ in range(max(100 - len(ledger_df), 20)):
         ledger_sheet.append(["", "", "", "", "", ""])
 
-    master_headers = ["コード", "科目", "分類", "帳票"]
-    master_sheet.append(master_headers)
+    opening_df = normalize_opening_balance_df(opening_balances) if opening_balances is not None else build_opening_balance_template()
+    opening_map = {
+        str(row["科目"]): {
+            "開始残高": safe_excel_int(row.get("開始残高", 0)),
+            "メモ": str(row.get("メモ", "") or ""),
+        }
+        for _, row in opening_df.iterrows()
+    }
+
     account_rows = get_account_master_rows(ledger_df)
+    seen_accounts = {row["科目"] for row in account_rows}
+    for _, opening_row in opening_df.iterrows():
+        account = str(opening_row.get("科目", "")).strip()
+        if not account or account in seen_accounts:
+            continue
+        category = str(opening_row.get("分類", "") or "").strip() or classify_account(account)
+        account_rows.append({
+            "コード": str(opening_row.get("コード", "") or ""),
+            "科目": account,
+            "分類": category,
+            "帳票": str(opening_row.get("帳票", "") or "").strip() or ("PL" if category in ["収益", "費用"] else "BS"),
+        })
+        seen_accounts.add(account)
+
+    master_headers = ["コード", "科目", "分類", "帳票", "開始残高", "メモ"]
+    master_sheet.append(master_headers)
     for row in account_rows:
-        master_sheet.append([row["コード"], row["科目"], row["分類"], row["帳票"]])
+        opening = opening_map.get(row["科目"], {})
+        master_sheet.append([
+            row["コード"],
+            row["科目"],
+            row["分類"],
+            row["帳票"],
+            opening.get("開始残高", 0),
+            opening.get("メモ", ""),
+        ])
 
     account_list_range = f"'科目マスタ'!$B$2:$B${len(account_rows) + 1}"
     validation = DataValidation(type="list", formula1=account_list_range, allow_blank=True)
@@ -1117,20 +1286,22 @@ def add_accounting_program_sheets(workbook, ledger_df: pd.DataFrame, period_labe
     validation.add(f"C2:C{ledger_sheet.max_row}")
     validation.add(f"E2:E{ledger_sheet.max_row}")
 
-    trial_headers = ["コード", "科目", "分類", "借方合計", "貸方合計", "残高"]
+    trial_headers = ["コード", "科目", "分類", "開始残高", "借方合計", "貸方合計", "現在残高"]
     trial_sheet.append(trial_headers)
     for row_idx, account in enumerate(account_rows, start=2):
         trial_sheet[f"A{row_idx}"] = account["コード"]
         trial_sheet[f"B{row_idx}"] = account["科目"]
         trial_sheet[f"C{row_idx}"] = f'=IFERROR(VLOOKUP(B{row_idx},科目マスタ!$B:$D,2,FALSE),"未分類")'
-        trial_sheet[f"D{row_idx}"] = f'=SUMIF(仕訳帳!$C:$C,B{row_idx},仕訳帳!$D:$D)'
-        trial_sheet[f"E{row_idx}"] = f'=SUMIF(仕訳帳!$E:$E,B{row_idx},仕訳帳!$F:$F)'
-        trial_sheet[f"F{row_idx}"] = f'=IF(OR(C{row_idx}="収益",C{row_idx}="負債",C{row_idx}="純資産"),E{row_idx}-D{row_idx},D{row_idx}-E{row_idx})'
+        trial_sheet[f"D{row_idx}"] = f'=IFERROR(INDEX(科目マスタ!$E:$E,MATCH(B{row_idx},科目マスタ!$B:$B,0)),0)'
+        trial_sheet[f"E{row_idx}"] = f'=SUMIF(仕訳帳!$C:$C,B{row_idx},仕訳帳!$D:$D)'
+        trial_sheet[f"F{row_idx}"] = f'=SUMIF(仕訳帳!$E:$E,B{row_idx},仕訳帳!$F:$F)'
+        trial_sheet[f"G{row_idx}"] = f'=D{row_idx}+IF(OR(C{row_idx}="収益",C{row_idx}="負債",C{row_idx}="純資産"),F{row_idx}-E{row_idx},E{row_idx}-F{row_idx})'
     trial_total_row = len(account_rows) + 2
     trial_sheet[f"B{trial_total_row}"] = "合計"
     trial_sheet[f"D{trial_total_row}"] = f"=SUM(D2:D{trial_total_row - 1})"
     trial_sheet[f"E{trial_total_row}"] = f"=SUM(E2:E{trial_total_row - 1})"
-    trial_sheet[f"F{trial_total_row}"] = f"=D{trial_total_row}-E{trial_total_row}"
+    trial_sheet[f"F{trial_total_row}"] = f"=SUM(F2:F{trial_total_row - 1})"
+    trial_sheet[f"G{trial_total_row}"] = f"=SUMIF(C2:C{trial_total_row - 1},\"資産\",G2:G{trial_total_row - 1})+SUMIF(C2:C{trial_total_row - 1},\"費用\",G2:G{trial_total_row - 1})-SUMIF(C2:C{trial_total_row - 1},\"負債\",G2:G{trial_total_row - 1})-SUMIF(C2:C{trial_total_row - 1},\"純資産\",G2:G{trial_total_row - 1})-SUMIF(C2:C{trial_total_row - 1},\"収益\",G2:G{trial_total_row - 1})"
 
     pl_sheet["A1"] = "PL 損益計算書"
     pl_sheet["B1"] = period_label
@@ -1141,7 +1312,7 @@ def add_accounting_program_sheets(workbook, ledger_df: pd.DataFrame, period_labe
     expense_accounts = [row["科目"] for row in account_rows if row["分類"] == "費用"]
     for account in revenue_accounts:
         pl_sheet[f"A{current_row}"] = account
-        pl_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$F:$F,MATCH(A{current_row},試算表!$B:$B,0)),0)'
+        pl_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$G:$G,MATCH(A{current_row},試算表!$B:$B,0)),0)'
         current_row += 1
     revenue_total_row = current_row
     pl_sheet[f"A{revenue_total_row}"] = "収益合計"
@@ -1150,7 +1321,7 @@ def add_accounting_program_sheets(workbook, ledger_df: pd.DataFrame, period_labe
     expense_start_row = current_row
     for account in expense_accounts:
         pl_sheet[f"A{current_row}"] = account
-        pl_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$F:$F,MATCH(A{current_row},試算表!$B:$B,0)),0)'
+        pl_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$G:$G,MATCH(A{current_row},試算表!$B:$B,0)),0)'
         current_row += 1
     expense_total_row = current_row
     pl_sheet[f"A{expense_total_row}"] = "費用合計"
@@ -1172,7 +1343,7 @@ def add_accounting_program_sheets(workbook, ledger_df: pd.DataFrame, period_labe
         category_start_row = current_row
         for account in [row["科目"] for row in account_rows if row["分類"] == category]:
             bs_sheet[f"A{current_row}"] = account
-            bs_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$F:$F,MATCH(A{current_row},試算表!$B:$B,0)),0)'
+            bs_sheet[f"B{current_row}"] = f'=IFERROR(INDEX(試算表!$G:$G,MATCH(A{current_row},試算表!$B:$B,0)),0)'
             current_row += 1
         if category == "純資産":
             bs_sheet[f"A{current_row}"] = "当期純利益"
@@ -1433,11 +1604,12 @@ def build_financial_statement_excel(
     profit_and_loss: pd.DataFrame,
     balance_sheet: pd.DataFrame,
     period_label: str,
+    opening_balances: pd.DataFrame | None = None,
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         workbook = writer.book
-        add_accounting_program_sheets(workbook, ledger_df, period_label, index=0)
+        add_accounting_program_sheets(workbook, ledger_df, period_label, index=0, opening_balances=opening_balances)
         if period_label == "年次決算":
             add_worksheet_sheet(workbook, trial_balance, period_label, index=5)
         apply_financial_report_format(workbook)
@@ -1582,7 +1754,8 @@ def render_bookkeeping_workspace(customer: dict, model: str, transaction_limit: 
         with st.expander("保存済み帳簿の管理"):
             saved_ledger = load_customer_ledger(customer)
             st.dataframe(saved_ledger, width="stretch", hide_index=True)
-            ledger_excel = build_excel(saved_ledger) if not saved_ledger.empty else b""
+            opening_balances = load_customer_opening_balances(customer)
+            ledger_excel = build_excel(saved_ledger, opening_balances) if not saved_ledger.empty else b""
             if not saved_ledger.empty:
                 st.download_button(
                     "保存済み帳簿をExcelでダウンロード",
@@ -1596,7 +1769,7 @@ def render_bookkeeping_workspace(customer: dict, model: str, transaction_limit: 
                 st.success("保存済み帳簿をクリアしました。")
                 st.rerun()
 
-        excel_bytes = build_excel(st.session_state["df"])
+        excel_bytes = build_excel(st.session_state["df"], load_customer_opening_balances(customer))
         filename = f"bookkeeping_entries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         st.download_button(
             "記帳・決算Excelをダウンロード",
@@ -1605,6 +1778,81 @@ def render_bookkeeping_workspace(customer: dict, model: str, transaction_limit: 
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width="stretch",
         )
+
+
+def render_opening_balance_workspace(customer: dict) -> None:
+    st.markdown(
+        """
+        <div class="app-panel">
+            <div class="eyebrow">OPENING BALANCE</div>
+            <div class="panel-title">使用開始前の財務データを登録</div>
+            <p class="panel-copy">このアプリを使い始める前の貸借対照表残高、または当期途中までのPL累計額を入力します。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    opening_df = load_customer_opening_balances(customer)
+
+    upload_col, guide_col = st.columns([0.9, 1.1], gap="large")
+    with upload_col:
+        uploaded_file = st.file_uploader(
+            "開始残高 CSV / Excel",
+            type=["csv", "xlsx", "xls"],
+            key="opening_balance_upload",
+        )
+        if uploaded_file is not None:
+            try:
+                uploaded_df = read_raw_table_upload(uploaded_file)
+                if set(OPENING_BALANCE_COLUMNS).intersection(uploaded_df.columns):
+                    imported_df = normalize_opening_balance_df(uploaded_df)
+                else:
+                    account_column = next((column for column in ["勘定科目", "科目", "項目"] if column in uploaded_df.columns), None)
+                    amount_column = next((column for column in ["開始残高", "残高", "金額"] if column in uploaded_df.columns), None)
+                    if not account_column:
+                        raise ValueError("科目列が見つかりません。'科目' または '勘定科目' 列を含めてください。")
+                    imported_df = pd.DataFrame({
+                        "科目": uploaded_df[account_column] if account_column else "",
+                        "開始残高": uploaded_df[amount_column] if amount_column else 0,
+                    })
+                    imported_df = normalize_opening_balance_df(imported_df)
+                save_customer_opening_balances(customer, imported_df)
+                st.success("開始残高を取り込みました。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"開始残高ファイルを読み取れませんでした：{exc}")
+
+    with guide_col:
+        st.info(
+            "入力ルール：資産・費用はプラス、負債・純資産・収益も通常の金額をプラスで入力してください。"
+            "例：現金 100,000、借入金 500,000、売上高 1,200,000。"
+        )
+
+    edited_df = st.data_editor(
+        opening_df,
+        num_rows="dynamic",
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "開始残高": st.column_config.NumberColumn("開始残高", step=1000, format="%d"),
+            "分類": st.column_config.SelectboxColumn("分類", options=["資産", "負債", "純資産", "収益", "費用", "未分類"]),
+            "帳票": st.column_config.SelectboxColumn("帳票", options=["BS", "PL", "要確認"]),
+        },
+    )
+
+    b1, b2, b3 = st.columns(3)
+    if b1.button("開始残高を保存", type="primary", width="stretch"):
+        save_customer_opening_balances(customer, edited_df)
+        st.success("保存しました。基本記帳・月次決算・年次決算に反映されます。")
+        st.rerun()
+    if b2.button("標準科目でリセット", width="stretch"):
+        save_customer_opening_balances(customer, build_opening_balance_template())
+        st.success("標準科目にリセットしました。")
+        st.rerun()
+
+    non_zero = normalize_opening_balance_df(edited_df)
+    non_zero = non_zero[non_zero["開始残高"] != 0]
+    b3.metric("登録済み残高科目", f"{len(non_zero)} 件")
 
 
 def render_closing_workspace(period_label: str, transaction_limit: int, customer: dict) -> None:
@@ -1666,7 +1914,8 @@ def render_closing_workspace(period_label: str, transaction_limit: int, customer
         else:
             ledger_df = prepared_df[prepared_df["年"] == selected_period][EXCEL_COLUMNS].copy()
 
-    trial_balance = build_trial_balance(ledger_df)
+    opening_balances = load_customer_opening_balances(customer)
+    trial_balance = build_trial_balance(ledger_df, opening_balances)
     profit_and_loss = build_profit_and_loss(trial_balance)
     balance_sheet = build_balance_sheet(trial_balance)
 
@@ -1692,7 +1941,14 @@ def render_closing_workspace(period_label: str, transaction_limit: int, customer
         checklist = build_checklist(MONTHLY_CHECKLIST_ITEMS if period_label == "月次決算" else YEARLY_CHECKLIST_ITEMS, period_label)
         st.dataframe(checklist, width="stretch", hide_index=True)
 
-    excel_bytes = build_financial_statement_excel(ledger_df, trial_balance, profit_and_loss, balance_sheet, period_label)
+    excel_bytes = build_financial_statement_excel(
+        ledger_df,
+        trial_balance,
+        profit_and_loss,
+        balance_sheet,
+        period_label,
+        load_customer_opening_balances(customer),
+    )
     filename = f"{period_label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     st.download_button(
         "決算表・財務諸表Excelをダウンロード",
@@ -1736,9 +1992,11 @@ def main() -> None:
         st.divider()
         st.info(get_config_value("UPGRADE_CONTACT", "上位プランをご希望の場合は管理者までお問い合わせください。"))
 
-    bookkeeping_tab, monthly_tab, yearly_tab = st.tabs(["基本記帳", "月次決算", "年次決算"])
+    bookkeeping_tab, opening_tab, monthly_tab, yearly_tab = st.tabs(["基本記帳", "開始残高設定", "月次決算", "年次決算"])
     with bookkeeping_tab:
         render_bookkeeping_workspace(customer, model, transaction_limit)
+    with opening_tab:
+        render_opening_balance_workspace(customer)
     with monthly_tab:
         render_closing_workspace("月次決算", transaction_limit, customer)
     with yearly_tab:
