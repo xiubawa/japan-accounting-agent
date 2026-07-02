@@ -862,6 +862,156 @@ def read_raw_table_upload(uploaded_file) -> pd.DataFrame:
     return pd.read_excel(uploaded_file)
 
 
+def parse_excel_amount(value) -> int | None:
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    negative = False
+    if text.startswith(("△", "▲")) or (text.startswith("(") and text.endswith(")")):
+        negative = True
+
+    cleaned = (
+        text.replace("円", "")
+        .replace(",", "")
+        .replace(" ", "")
+        .replace("　", "")
+        .replace("△", "")
+        .replace("▲", "")
+        .replace("(", "")
+        .replace(")", "")
+    )
+    cleaned = cleaned.replace("－", "-").replace("ー", "-").replace("―", "-")
+    if cleaned in ["", "-", "0"]:
+        return 0
+    try:
+        amount = int(float(cleaned))
+    except ValueError:
+        return None
+    return -amount if negative else amount
+
+
+def clean_account_name(value) -> str:
+    text = str(value or "").strip()
+    text = text.replace("\n", " ").replace("\r", " ")
+    text = " ".join(text.split())
+    return text
+
+
+def is_opening_account_candidate(value) -> bool:
+    account = clean_account_name(value)
+    if not account or len(account) > 28:
+        return False
+    if parse_excel_amount(account) is not None:
+        return False
+    blocked_words = [
+        "科目", "項目", "摘要", "日付", "コード", "分類", "帳票", "金額", "残高", "借方", "貸方",
+        "合計", "小計", "総計", "当期純利益", "貸借対照表", "損益計算書", "試算表", "精算表",
+    ]
+    if account in blocked_words or any(account.endswith(word) and account != "売上高" for word in ["合計", "小計"]):
+        return False
+    known_accounts = {name for _, name in ACCOUNT_CODE_TABLE}
+    if account in known_accounts:
+        return True
+    return classify_account(account) != "未分類"
+
+
+def infer_statement_category(account: str, category_hint: str = "") -> str:
+    category = classify_account(account)
+    if category != "未分類":
+        return category
+    if category_hint in ["資産", "負債", "純資産", "収益", "費用"]:
+        return category_hint
+    return "未分類"
+
+
+def extract_opening_balances_from_frame(raw_df: pd.DataFrame, sheet_name: str = "") -> pd.DataFrame:
+    rows = []
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(columns=OPENING_BALANCE_COLUMNS)
+
+    category_hint = ""
+    for _, row in raw_df.fillna("").iterrows():
+        values = list(row.values)
+        row_text = " ".join(clean_account_name(value) for value in values if clean_account_name(value))
+        for category in ["資産", "負債", "純資産", "収益", "費用"]:
+            if row_text == category or row_text.startswith(f"{category} "):
+                category_hint = category
+
+        for index, value in enumerate(values):
+            account = clean_account_name(value)
+            if not is_opening_account_candidate(account):
+                continue
+
+            amount = None
+            for offset in range(1, 5):
+                if index + offset >= len(values):
+                    break
+                amount = parse_excel_amount(values[index + offset])
+                if amount is not None:
+                    break
+            if amount is None:
+                numeric_values = [parse_excel_amount(item) for item in values]
+                numeric_values = [item for item in numeric_values if item is not None]
+                if numeric_values:
+                    amount = numeric_values[-1]
+            if amount is None:
+                continue
+
+            category = infer_statement_category(account, category_hint)
+            rows.append({
+                "コード": "",
+                "科目": account,
+                "分類": category,
+                "帳票": "PL" if category in ["収益", "費用"] else ("要確認" if category == "未分類" else "BS"),
+                "開始残高": amount,
+                "メモ": f"{sheet_name}から取込" if sheet_name else "アップロードから取込",
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=OPENING_BALANCE_COLUMNS)
+
+    extracted = pd.DataFrame(rows, columns=OPENING_BALANCE_COLUMNS)
+    extracted = extracted.drop_duplicates(subset=["科目"], keep="last")
+    return normalize_opening_balance_df(extracted)
+
+
+def read_opening_balance_upload(uploaded_file) -> pd.DataFrame:
+    if uploaded_file is None:
+        return pd.DataFrame(columns=OPENING_BALANCE_COLUMNS)
+
+    name = uploaded_file.name.lower()
+    frames: list[tuple[str, pd.DataFrame]] = []
+    if name.endswith(".csv"):
+        try:
+            uploaded_file.seek(0)
+            frames.append(("CSV", pd.read_csv(uploaded_file, encoding="utf-8-sig", header=None)))
+        except UnicodeDecodeError:
+            uploaded_file.seek(0)
+            frames.append(("CSV", pd.read_csv(uploaded_file, encoding="cp932", header=None)))
+    else:
+        uploaded_file.seek(0)
+        sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None)
+        frames.extend((str(sheet_name), sheet_df) for sheet_name, sheet_df in sheets.items())
+
+    extracted_frames = [
+        extract_opening_balances_from_frame(frame, sheet_name)
+        for sheet_name, frame in frames
+    ]
+    extracted_frames = [frame for frame in extracted_frames if not frame.empty]
+    if not extracted_frames:
+        raise ValueError("科目と金額を自動判定できませんでした。科目名と残高が同じ行にある表をアップロードしてください。")
+
+    merged = pd.concat(extracted_frames, ignore_index=True)
+    merged = merged.drop_duplicates(subset=["科目"], keep="last")
+    return normalize_opening_balance_df(merged)
+
+
 def normalize_uploaded_ledger(raw_df: pd.DataFrame) -> pd.DataFrame:
     if raw_df.empty:
         return pd.DataFrame(columns=EXCEL_COLUMNS)
@@ -1846,29 +1996,19 @@ def render_opening_balance_workspace(customer: dict) -> None:
         )
         if uploaded_file is not None:
             try:
-                uploaded_df = read_raw_table_upload(uploaded_file)
-                if set(OPENING_BALANCE_COLUMNS).intersection(uploaded_df.columns):
-                    imported_df = normalize_opening_balance_df(uploaded_df)
-                else:
-                    account_column = next((column for column in ["勘定科目", "科目", "項目"] if column in uploaded_df.columns), None)
-                    amount_column = next((column for column in ["開始残高", "残高", "金額"] if column in uploaded_df.columns), None)
-                    if not account_column:
-                        raise ValueError("科目列が見つかりません。'科目' または '勘定科目' 列を含めてください。")
-                    imported_df = pd.DataFrame({
-                        "科目": uploaded_df[account_column] if account_column else "",
-                        "開始残高": uploaded_df[amount_column] if amount_column else 0,
-                    })
-                    imported_df = normalize_opening_balance_df(imported_df)
+                imported_df = read_opening_balance_upload(uploaded_file)
                 save_customer_opening_balances(customer, imported_df)
-                st.success("開始残高を取り込みました。")
+                imported_count = len(imported_df[imported_df["開始残高"] != 0])
+                st.success(f"開始残高を取り込みました。残高あり {imported_count} 科目を識別しました。")
                 st.rerun()
             except Exception as exc:
                 st.error(f"開始残高ファイルを読み取れませんでした：{exc}")
 
     with guide_col:
         st.info(
-            "入力ルール：資産・費用はプラス、負債・純資産・収益も通常の金額をプラスで入力してください。"
-            "例：現金 100,000、借入金 500,000、売上高 1,200,000。"
+            "アップロードは、科目名と金額が同じ行にある財務表なら読み取れます。"
+            "例：現金 100,000、普通預金 500,000、借入金 300,000、売上高 1,200,000。"
+            "読み取り後は下の表で確認・修正して保存してください。"
         )
 
     edited_df = st.data_editor(
