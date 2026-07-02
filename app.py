@@ -6,6 +6,7 @@ import io
 import json
 import os
 import secrets as token_secrets
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -796,9 +797,7 @@ def build_excel(df: pd.DataFrame, opening_balances: pd.DataFrame | None = None) 
         add_accounting_program_sheets(workbook, df, "基本記帳・決算補助", index=0, opening_balances=opening_balances)
         apply_financial_report_format(workbook)
         for sheet in workbook.worksheets:
-            for column_index, column_cells in enumerate(sheet.columns, start=1):
-                max_length = max(len(str(cell.value or "")) for cell in column_cells)
-                sheet.column_dimensions[get_column_letter(column_index)].width = min(max(max_length + 2, 12), 38)
+            set_readable_column_widths(sheet, max_width=38)
     return output.getvalue()
 
 
@@ -1184,6 +1183,32 @@ def safe_excel_int(value) -> int:
     return 0 if pd.isna(number) else int(number)
 
 
+def excel_display_width(value) -> int:
+    text = str(value or "")
+    if text.startswith("="):
+        return 12
+    width = 0
+    for char in text:
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W", "A"} else 1
+    return width
+
+
+def set_readable_column_widths(sheet, max_width: int = 42) -> None:
+    for column_idx in range(1, sheet.max_column + 1):
+        column_letter = get_column_letter(column_idx)
+        max_length = max(excel_display_width(cell.value) for cell in sheet[column_letter])
+        sheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), max_width)
+    if sheet.title in ["PL", "BS"]:
+        sheet.column_dimensions["A"].width = max(sheet.column_dimensions["A"].width or 0, 24)
+        sheet.column_dimensions["B"].width = max(sheet.column_dimensions["B"].width or 0, 18)
+    elif sheet.title == "仕訳帳":
+        sheet.column_dimensions["B"].width = max(sheet.column_dimensions["B"].width or 0, 34)
+    elif sheet.title in ["科目マスタ", "試算表"]:
+        sheet.column_dimensions["B"].width = max(sheet.column_dimensions["B"].width or 0, 24)
+        if sheet.title == "科目マスタ":
+            sheet.column_dimensions["F"].width = max(sheet.column_dimensions["F"].width or 0, 30)
+
+
 def style_program_sheet(sheet, header_row: int = 1, freeze: str | None = "A2") -> None:
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(color="FFFFFF", bold=True)
@@ -1206,10 +1231,31 @@ def style_program_sheet(sheet, header_row: int = 1, freeze: str | None = "A2") -
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    for column_idx in range(1, sheet.max_column + 1):
-        column_letter = get_column_letter(column_idx)
-        max_length = max(len(str(cell.value or "")) for cell in sheet[column_letter])
-        sheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 26)
+    set_readable_column_widths(sheet, max_width=34)
+
+
+def polish_statement_sheet(sheet, title: str, period_label: str) -> None:
+    sheet.merge_cells("A1:B1")
+    sheet["A1"] = title
+    sheet["A1"].font = Font(size=15, bold=True, color="0F172A")
+    sheet["A1"].fill = PatternFill("solid", fgColor="E0F2FE")
+    sheet["A1"].alignment = Alignment(horizontal="left", vertical="center")
+    sheet["A2"] = period_label
+    sheet["A2"].font = Font(bold=True, color="2563EB")
+    sheet["A2"].alignment = Alignment(horizontal="left", vertical="center")
+    sheet.row_dimensions[1].height = 24
+    sheet.row_dimensions[2].height = 20
+    sheet.column_dimensions["A"].width = 24
+    sheet.column_dimensions["B"].width = 18
+
+    for row in sheet.iter_rows(min_row=4, max_row=sheet.max_row, min_col=1, max_col=2):
+        label = str(row[0].value or "")
+        if label in ["収益", "費用", "資産", "負債", "純資産"]:
+            for cell in row:
+                cell.font = Font(bold=True, color="1F4E78")
+                cell.fill = PatternFill("solid", fgColor="DBEAFE")
+        for cell in row:
+            cell.alignment = Alignment(vertical="center", wrap_text=False)
 
 
 def add_accounting_program_sheets(
@@ -1362,10 +1408,9 @@ def add_accounting_program_sheets(
     style_program_sheet(trial_sheet, freeze="A2")
     style_program_sheet(pl_sheet, header_row=3, freeze="A4")
     style_program_sheet(bs_sheet, header_row=3, freeze="A4")
+    polish_statement_sheet(pl_sheet, "PL 損益計算書", period_label)
+    polish_statement_sheet(bs_sheet, "BS 貸借対照表", period_label)
 
-    for sheet in [pl_sheet, bs_sheet]:
-        sheet["A1"].font = Font(size=16, bold=True, color="0F172A")
-        sheet["B1"].font = Font(bold=True, color="2563EB")
     for sheet, rows in [(trial_sheet, [trial_total_row]), (pl_sheet, [revenue_total_row, expense_total_row, net_income_row])]:
         for row_idx in rows:
             for cell in sheet[row_idx]:
@@ -1615,9 +1660,7 @@ def build_financial_statement_excel(
         apply_financial_report_format(workbook)
 
         for sheet in workbook.worksheets:
-            for column_index, column_cells in enumerate(sheet.columns, start=1):
-                max_length = max(len(str(cell.value or "")) for cell in column_cells)
-                sheet.column_dimensions[get_column_letter(column_index)].width = min(max(max_length + 2, 12), 38)
+            set_readable_column_widths(sheet, max_width=38)
     return output.getvalue()
 
 
